@@ -1,0 +1,62 @@
+.nu-people__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--nu-space-1);
+  max-height: min(60vh, 480px);
+  overflow-y: auto;
+}
+
+.nu-people__row {
+  display: flex;
+  align-items: center;
+  gap: var(--nu-space-3);
+}
+
+.nu-people__person {
+  appearance: none;
+  border: none;
+  background: none;
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--nu-space-3);
+  padding: var(--nu-space-2);
+  border-radius: var(--nu-radius-md);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.nu-people__person:hover {
+  background: var(--nu-color-bg-tertiary);
+}
+
+.nu-people__names {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.nu-people__name {
+  font-weight: 700;
+  color: var(--nu-color-text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nu-people__handle,
+.nu-people__empty,
+.nu-people__note {
+  color: var(--nu-color-text-muted);
+  font-size: var(--nu-font-size-sm);
+}
+
+.nu-people__note {
+  margin: var(--nu-space-3) 0 0;
+}

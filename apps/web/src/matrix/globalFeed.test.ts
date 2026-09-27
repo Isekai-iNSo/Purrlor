@@ -100,7 +100,25 @@ describe('profileSourceFromState', () => {
       member,
       { type: 'xyz.nekous.feed', state_key: '', content: { owner: '@ana:example.org', profile: true } },
     ]);
-    expect(result).toEqual({ roomId: '!p:x', owner: '@ana:example.org', ownerName: 'Ana', origin: { kind: 'global' }, isPublic: true });
+    expect(result).toEqual({
+      roomId: '!p:x',
+      owner: '@ana:example.org',
+      ownerName: 'Ana',
+      origin: { kind: 'global' },
+      isPublic: true,
+      follows: [],
+    });
+  });
+
+  it('reads who the owner follows, skipping unfollows', () => {
+    const result = profileSourceFromState('!p:x', [
+      create,
+      member,
+      { type: 'xyz.nekous.feed', state_key: '', content: { owner: '@ana:example.org', profile: true } },
+      { type: 'xyz.nekous.follow', state_key: '@bo:example.org', content: { following: true } },
+      { type: 'xyz.nekous.follow', state_key: '@cy:example.org', content: {} },
+    ]);
+    expect(result?.follows).toEqual(['@bo:example.org']);
   });
 
   it('rejects a marker that names someone other than the room’s creator', () => {

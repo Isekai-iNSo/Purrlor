@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi, beforeAll } from 'vitest';
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { Provider as JotaiProvider, createStore } from 'jotai';
 import { MatrixClientContext } from '../matrix/MatrixClientContext';
 import { globalFeedOpenAtom, selectedRoomIdAtom, selectedSpaceIdAtom } from '../app/state/selection';
@@ -147,6 +147,8 @@ describe('FeedView against the demo world', () => {
     await screen.findByText(/movie night friday/);
     // Four posts (one is Nibbles' repost), but only the one you wrote is yours to take back.
     expect(screen.getAllByRole('article')).toHaveLength(4);
+    // It lives in each post's ⋯ menu: open them all, and it's there once.
+    document.querySelectorAll('[data-nu-role="post-more"]').forEach((button) => fireEvent.click(button));
     expect(screen.getAllByText('Make private')).toHaveLength(1);
   });
 });

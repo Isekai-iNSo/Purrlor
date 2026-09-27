@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import { useState, type MouseEvent, type ReactNode } from 'react';
 import type { RoomMember } from 'matrix-js-sdk';
 import { Avatar } from '../../components/Avatar';
 import { Icon } from '../../components/Icon';
@@ -6,9 +6,11 @@ import type { Emote } from '../../matrix/emotes';
 import type { PostContent, PostOrigin, RepostOf } from '../../matrix/feed';
 import { useIgnoredUsers } from '../../matrix/hooks/useIgnoredUsers';
 import { useRepostStatus } from '../../matrix/hooks/useRepostStatus';
-import { renderMessageText } from '../messaging/renderMessageText';
+import { LinkPreviewCard } from '../messaging/LinkPreviewCard';
+import { extractFirstUrl, renderMessageText } from '../messaging/renderMessageText';
 import { formatPostTime } from './formatPostTime';
 import { PostMedia } from './PostMedia';
+import { useOpenHashtag } from './useOpenHashtag';
 
 export type PostAuthor = { userId: string; name: string; avatarUrl?: string | null };
 
@@ -31,6 +33,8 @@ type PostCardProps = {
    *  canOpenOrigin); a Global chip is never a link, since the author's name already is. */
   onOpenOrigin?: (origin: PostOrigin) => void;
   canOpenOrigin?: (origin: PostOrigin) => boolean;
+  /** Opens the post on its own page — from its time, or a tap on its text. Absent on that page. */
+  onOpen?: () => void;
   actions?: ReactNode;
   /** Below the action row — the comment thread, when it's open. */
   footer?: ReactNode;
@@ -66,6 +70,39 @@ function AuthorName({ author, onOpenProfile }: { author: PostAuthor; onOpenProfi
 }
 
 /**
+ * A content warning: the warning's text, and a button that shows or hides what it covers. Each
+ * card remembers its own choice while it's on screen; nothing is remembered past that.
+ */
+function WarningGate({ warning, children }: { warning?: string; children: ReactNode }) {
+  const [shown, setShown] = useState(false);
+  if (!warning) return <>{children}</>;
+  return (
+    <>
+      <div className="nu-post__warning" data-nu-role="post-warning">
+        <Icon name="eyeOff" size={14} />
+        <span className="nu-post__warning-text">{warning}</span>
+        <button
+          type="button"
+          className="nu-post__warning-toggle"
+          data-nu-role="post-warning-toggle"
+          aria-expanded={shown}
+          onClick={() => setShown((s) => !s)}
+        >
+          {shown ? 'Show less' : 'Show more'}
+        </button>
+      </div>
+      {shown && children}
+    </>
+  );
+}
+
+/** The first link in a post, unfurled — unless the post has its own media to show instead. */
+function PostLinkPreview({ content }: { content: { body: string; attachments?: unknown[] } }) {
+  const url = content.attachments?.length ? undefined : extractFirstUrl(content.body);
+  return url ? <LinkPreviewCard url={url} /> : null;
+}
+
+/**
  * The original inside a repost. The copy travels with the repost, so it's checked against the real
  * post (matrix/repostCheck.ts): a deleted original shows as removed, and a copy that doesn't match
  * isn't shown at all. Until the check answers, and when it can't, the copy shows.
@@ -83,6 +120,7 @@ function RepostQuote({
 }) {
   const status = useRepostStatus(repost);
   const ignored = useIgnoredUsers();
+  const openHashtag = useOpenHashtag();
   if (ignored.has(repost.sender)) {
     return (
       <blockquote className="nu-post__quote nu-post__quote--unavailable" data-nu-role="post-repost-unavailable">
@@ -111,8 +149,13 @@ function RepostQuote({
           </span>
         )}
       </header>
-      {repost.body && <div className="nu-post__text">{renderMessageText(repost.body, [], [], myUserId)}</div>}
-      {repost.attachments && <PostMedia attachments={repost.attachments} />}
+      <WarningGate warning={repost.warning}>
+        {repost.body && (
+          <div className="nu-post__text">{renderMessageText(repost.body, [], [], myUserId, { onHashtag: openHashtag })}</div>
+        )}
+        {repost.attachments && <PostMedia attachments={repost.attachments} sensitive={repost.sensitive} />}
+        <PostLinkPreview content={repost} />
+      </WarningGate>
     </blockquote>
   );
 }
@@ -135,10 +178,22 @@ export function PostCard({
   onOpenProfile,
   onOpenOrigin,
   canOpenOrigin,
+  onOpen,
   actions,
   footer,
   role = 'feed-post',
 }: PostCardProps) {
+  // A tap on the text opens the post, like any social app — except on something that's its own
+  // control (a link, a mention, a spoiler) or when the tap was the end of selecting text to copy.
+  const openFromText = (evt: MouseEvent) => {
+    if (!onOpen) return;
+    if ((evt.target as HTMLElement).closest('a, button, input, textarea, [role="button"]')) return;
+    if (window.getSelection()?.toString()) return;
+    onOpen();
+  };
+  const time = new Date(ts);
+  const openHashtag = useOpenHashtag();
+
   const repost = content.repostOf;
   const openerFor = (target: PostOrigin) =>
     onOpenOrigin && target.kind === 'space' && (canOpenOrigin?.(target) ?? true) ? onOpenOrigin : undefined;
@@ -161,18 +216,33 @@ export function PostCard({
               Only you
             </span>
           )}
-          <time className="nu-post__time" dateTime={new Date(ts).toISOString()} title={new Date(ts).toLocaleString()}>
-            {formatPostTime(ts)}
-          </time>
+          {onOpen ? (
+            <button type="button" className="nu-post__time nu-post__time--link" data-nu-role="post-open-page" title={time.toLocaleString()} onClick={onOpen}>
+              <time dateTime={time.toISOString()}>{formatPostTime(ts)}</time>
+            </button>
+          ) : (
+            <time className="nu-post__time" dateTime={time.toISOString()} title={time.toLocaleString()}>
+              {formatPostTime(ts)}
+            </time>
+          )}
           {edited && (
             <span className="nu-post__time" data-nu-role="post-edited">
               (edited)
             </span>
           )}
         </header>
-        {bodyOverride ??
-          (content.body && <div className="nu-post__text">{renderMessageText(content.body, emotes, members, myUserId)}</div>)}
-        {content.attachments && <PostMedia attachments={content.attachments} />}
+        {bodyOverride ?? (
+          <WarningGate warning={content.warning}>
+            {content.body && (
+              // No keyboard handler needed here: the time button is the keyboard route to the same page.
+              <div className={onOpen ? 'nu-post__text nu-post__text--openable' : 'nu-post__text'} onClick={openFromText}>
+                {renderMessageText(content.body, emotes, members, myUserId, { onHashtag: openHashtag })}
+              </div>
+            )}
+            {content.attachments && <PostMedia attachments={content.attachments} sensitive={content.sensitive} />}
+            <PostLinkPreview content={content} />
+          </WarningGate>
+        )}
         {repost && <RepostQuote repost={repost} myUserId={myUserId} onOpenProfile={onOpenProfile} openerFor={openerFor} />}
         {actions && <div className="nu-post__actions">{actions}</div>}
         {footer}

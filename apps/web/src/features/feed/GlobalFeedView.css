@@ -6,7 +6,7 @@
 }
 
 .nu-global-feed__note {
-  margin: var(--nu-space-2) 0 0;
+  margin-block: var(--nu-space-2) 0;
   color: var(--nu-color-text-muted);
   font-size: var(--nu-font-size-xs);
   text-align: center;
@@ -14,7 +14,6 @@
 
 .nu-global-feed__manage-toggle {
   appearance: none;
-  align-self: flex-start;
   display: flex;
   align-items: center;
   gap: var(--nu-space-1);
@@ -75,4 +74,89 @@
   color: var(--nu-color-text-muted);
   font-weight: 400;
   font-size: var(--nu-font-size-xs);
+}
+
+/* A dot on a tab with something new behind it (Activity). */
+.nu-feed__tab {
+  position: relative;
+}
+
+.nu-feed__tab-dot {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--nu-radius-full);
+  background: var(--nu-color-danger);
+  box-shadow: 0 0 0 2px var(--nu-color-bg-secondary);
+}
+
+/* Search box above the timeline. */
+.nu-feed-search {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.nu-feed-search__icon {
+  position: absolute;
+  left: var(--nu-space-3);
+  color: var(--nu-color-text-muted);
+  pointer-events: none;
+}
+
+.nu-feed-search__input {
+  width: 100%;
+  padding: var(--nu-space-2) var(--nu-space-6, 32px) var(--nu-space-2) calc(var(--nu-space-3) + 24px);
+  border: 1px solid var(--nu-color-border);
+  border-radius: var(--nu-radius-full);
+  background: var(--nu-color-bg-primary);
+  color: var(--nu-color-text-primary);
+  font: inherit;
+}
+
+.nu-feed-search__input:focus {
+  outline: none;
+  border-color: var(--nu-color-accent);
+}
+
+/* The browser's own clear "x" would sit on top of ours. */
+.nu-feed-search__input::-webkit-search-cancel-button {
+  appearance: none;
+}
+
+.nu-feed-search__clear {
+  appearance: none;
+  border: none;
+  position: absolute;
+  right: var(--nu-space-2);
+  display: flex;
+  padding: var(--nu-space-1);
+  border-radius: var(--nu-radius-full);
+  background: none;
+  color: var(--nu-color-text-muted);
+  cursor: pointer;
+}
+
+.nu-feed-search__clear:hover {
+  color: var(--nu-color-text-primary);
+}
+
+.nu-feed-search__summary {
+  margin-block: 0;
+  color: var(--nu-color-text-muted);
+  font-size: var(--nu-font-size-sm);
+}
+
+.nu-feed-search__summary strong {
+  color: var(--nu-color-text-primary);
+}
+
+/* On a phone the three tabs need the header's width more than the title does; the globe icon
+   still says where you are. */
+@media (max-width: 480px) {
+  .nu-global-feed__header .nu-main-pane__header-name {
+    display: none;
+  }
 }

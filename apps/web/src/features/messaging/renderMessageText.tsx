@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 import type { RoomMember } from 'matrix-js-sdk';
 import type { Emote } from '../../matrix/emotes';
+import { HASHTAG_PATTERN, normalizeTag } from '../../matrix/hashtags';
 import { CodeBlock } from './CodeBlock';
 import { EmoteImage } from './EmoteImage';
 import { SpoilerText } from './SpoilerText';
@@ -81,9 +82,32 @@ function pushPatternMatches(
  * else is deliberately supported nested inside another (e.g. an emote inside bold text just
  * renders as literal characters) — a scope cut like several others in this app, not a bug.
  */
-export function renderMessageText(text: string, emotes: Emote[], members: RoomMember[] = [], myUserId?: string): ReactNode {
+export function renderMessageText(
+  text: string,
+  emotes: Emote[],
+  members: RoomMember[] = [],
+  myUserId?: string,
+  /** Posts only: `#tags` become buttons that open that tag's timeline (hashtags.ts). */
+  options: { onHashtag?: (tag: string) => void } = {}
+): ReactNode {
   const matches: Match[] = [];
   let key = 0;
+  const { onHashtag } = options;
+
+  if (onHashtag) {
+    for (const match of text.matchAll(HASHTAG_PATTERN)) {
+      const tag = normalizeTag(match[1]);
+      matches.push({
+        index: match.index,
+        length: match[0].length,
+        node: (
+          <button key={key++} type="button" className="nu-hashtag" data-nu-role="hashtag" onClick={() => onHashtag(tag)}>
+            {match[0]}
+          </button>
+        ),
+      });
+    }
+  }
 
   if (emotes.length > 0) {
     const byShortcode = new Map(emotes.map((emote) => [emote.shortcode, emote]));

@@ -6,8 +6,8 @@ import {
   type MatrixClient,
 } from 'matrix-js-sdk';
 import { channelTypeInitialStateEvent } from './channelType';
-import { setProfileRoom } from './extendedProfile';
-import { FEED_MARKER_EVENT, POST_EVENT_TYPE, rejoinOwnRoom } from './feed';
+import { getExtendedProfile, setProfileRoom } from './extendedProfile';
+import { FEED_MARKER_EVENT, feedJoinVia, POST_EVENT_TYPE, rejoinOwnRoom } from './feed';
 
 /**
  * A person's **profile feed** — where a post goes when its author picks "Global" instead of one
@@ -74,4 +74,48 @@ export async function ensureProfileRoom(mx: MatrixClient, displayName: string): 
   await mx.setAccountData(PROFILE_ROOM_ACCOUNT_DATA as any, { roomId } as any);
   await setProfileRoom(mx, roomId);
   return roomId;
+}
+
+/**
+ * **Public follows.** Following a person is also published, as one state event per person in your
+ * own profile room (state key: their user ID; `following: true`, or empty content once you
+ * unfollow — state can't be deleted). The room is world-readable, so anyone can read who you
+ * follow, and the global feed, which already reads every listed profile room's state, counts who
+ * follows whom from the same requests. Following a Space stays private (follows.ts).
+ *
+ * The person you follow is told with a `xyz.nekous.followed` event in *their* profile room, which
+ * they're always in — so it reaches them live, like a like does (activity.ts).
+ */
+export const FOLLOW_STATE_EVENT = 'xyz.nekous.follow';
+export const FOLLOWED_EVENT = 'xyz.nekous.followed';
+
+type RawState = { type: string; state_key?: string; content?: Record<string, unknown> };
+
+/** Who a profile room's owner follows, from its raw state. */
+export function readProfileFollows(events: RawState[]): string[] {
+  return events
+    .filter((event) => event.type === FOLLOW_STATE_EVENT && !!event.state_key && event.content?.following === true)
+    .map((event) => event.state_key as string);
+}
+
+/**
+ * Publishes a follow or unfollow. Following someone creates your profile room if you haven't one
+ * yet (it's where the follow is published); unfollowing without one has nothing to take back.
+ */
+export async function publishFollow(mx: MatrixClient, userId: string, following: boolean, displayName: string): Promise<void> {
+  const roomId = following ? await ensureProfileRoom(mx, displayName) : getOwnProfileRoomId(mx);
+  if (!roomId) return;
+  await mx.sendStateEvent(roomId, FOLLOW_STATE_EVENT as any, (following ? { following: true } : {}) as any, userId);
+  if (!following) return;
+  // Tell them. Best-effort: someone who has never posted globally has no profile room to tell.
+  const { profileRoom } = await getExtendedProfile(mx, userId);
+  if (!profileRoom) return;
+  try {
+    if (mx.getRoom(profileRoom)?.getMyMembership() !== 'join') {
+      await mx.joinRoom(profileRoom, { viaServers: feedJoinVia(profileRoom, userId) });
+    }
+    await mx.sendEvent(profileRoom, FOLLOWED_EVENT as any, {} as any);
+  } catch {
+    // The follow itself is published either way.
+  }
 }

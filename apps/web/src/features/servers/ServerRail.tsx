@@ -1,5 +1,6 @@
 import { useState } from 'react';
-import { useAtom, useSetAtom } from 'jotai';
+import { useAtom, useAtomValue, useSetAtom } from 'jotai';
+import { activityAtom } from '../../app/state/feed';
 import type { Room } from 'matrix-js-sdk';
 import { globalFeedOpenAtom, profileUserIdAtom, selectedRoomIdAtom, selectedSpaceIdAtom } from '../../app/state/selection';
 import { Icon } from '../../components/Icon';
@@ -73,6 +74,8 @@ export function ServerRail() {
   const [selectedSpaceId, setSelectedSpaceId] = useAtom(selectedSpaceIdAtom);
   const [, setSelectedRoomId] = useAtom(selectedRoomIdAtom);
   const [globalFeedOpen, setGlobalFeedOpen] = useAtom(globalFeedOpenAtom);
+  const activity = useAtomValue(activityAtom);
+  const activityUnread = activity.items.some((item) => item.ts > activity.seenTs);
   const setProfileUserId = useSetAtom(profileUserIdAtom);
   const [showCreateSpace, setShowCreateSpace] = useState(false);
   const [showDiscover, setShowDiscover] = useState(false);
@@ -139,6 +142,8 @@ export function ServerRail() {
       >
         <CatEars />
         <Icon name="globe" size={22} />
+        {/* New likes, comments, reposts, follows or mentions waiting in Activity. */}
+        {activityUnread && <span className="nu-server-rail__item-dot" data-nu-role="server-rail-activity-dot" aria-label="New activity" />}
       </button>
       <div className="nu-server-rail__divider" />
       <div className="nu-server-rail__list" data-nu-role="server-rail-list">

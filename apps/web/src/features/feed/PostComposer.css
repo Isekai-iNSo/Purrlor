@@ -156,3 +156,46 @@
   color: var(--nu-color-text-muted);
   font-size: var(--nu-font-size-xs);
 }
+
+/* The content-warning toggle: a text chip beside the media button, lit while a CW is on. */
+.nu-post-composer__cw {
+  appearance: none;
+  border: none;
+  height: 34px;
+  padding: 0 var(--nu-space-2);
+  border-radius: var(--nu-radius-md);
+  background: var(--nu-color-bg-tertiary);
+  color: var(--nu-color-text-secondary);
+  font: inherit;
+  font-size: var(--nu-font-size-xs);
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.nu-post-composer__cw:hover,
+.nu-post-composer__cw--on {
+  color: var(--nu-color-text-primary);
+}
+
+.nu-post-composer__cw--on {
+  background: color-mix(in srgb, var(--nu-color-warning) 25%, var(--nu-color-bg-tertiary));
+}
+
+.nu-post-composer__warning {
+  width: 100%;
+  padding: var(--nu-space-2) var(--nu-space-3);
+  border: 1px solid color-mix(in srgb, var(--nu-color-warning) 55%, var(--nu-color-border));
+  border-radius: var(--nu-radius-md);
+  background: var(--nu-color-bg-primary);
+  color: var(--nu-color-text-primary);
+  font: inherit;
+}
+
+/* The counter sits at the right, just before Post. */
+.nu-post-composer__bar > .nu-char-counter {
+  margin-left: auto;
+}
+
+.nu-post-composer__bar > .nu-char-counter + .nu-post-composer__submit {
+  margin-left: var(--nu-space-2);
+}

@@ -7,6 +7,7 @@ import { MemberList } from '../features/members/MemberList';
 import { DesktopNotifications } from '../features/notifications/DesktopNotifications';
 import { PostNotificationRules } from '../features/notifications/PostNotificationRules';
 import { FeedGovernance } from '../features/feed/FeedGovernance';
+import { ActivityWatcher } from '../features/notifications/ActivityWatcher';
 import { MentionInboxCollector } from '../features/notifications/MentionInboxCollector';
 import { MentionInviteAcceptor } from '../features/notifications/MentionInviteAcceptor';
 import { SpaceAutoJoiner } from '../features/servers/SpaceAutoJoiner';
@@ -15,6 +16,7 @@ import { RecoveryKeyPrompt } from '../features/security/RecoveryKeyPrompt';
 import { VoiceCallSession } from '../features/voice/VoiceCallSession';
 import { DemoModeBanner } from '../demo/DemoModeBanner';
 import { isDemoMode } from '../demo/demoMode';
+import { useComposeShortcut } from '../features/feed/useComposeShortcut';
 import { useJoinFromInviteLink } from '../matrix/hooks/useJoinFromInviteLink';
 import { useOpenRoomFromNotification } from '../matrix/hooks/useOpenRoomFromNotification';
 import { useRecoveryStatus } from '../matrix/hooks/useRecoveryStatus';
@@ -37,6 +39,7 @@ export function AppShell() {
   // or the global feed. The last two aren't rooms, so a room check alone left them invisible.
   const mainPaneHasContent = !!selectedRoomId || spaceView === 'feed' || globalFeedOpen || profileOpen || postOpen;
   useOpenRoomFromNotification();
+  useComposeShortcut();
   const inviteLinkJoin = useJoinFromInviteLink();
   const [inviteErrorDismissed, setInviteErrorDismissed] = useState(false);
 
@@ -70,6 +73,7 @@ export function AppShell() {
       {/* Writes power levels and kicks; the demo's sample world has nothing it should change. */}
       {!isDemoMode() && <FeedGovernance />}
       <MentionInboxCollector />
+      <ActivityWatcher />
       <MentionInviteAcceptor />
       <SpaceAutoJoiner />
       <IncomingVerificationListener />

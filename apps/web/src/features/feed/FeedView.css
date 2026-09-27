@@ -173,6 +173,33 @@
   font-size: var(--nu-font-size-xs);
 }
 
+/* The time doubles as the link to the post's own page, as on most social apps. */
+.nu-post__time--link {
+  appearance: none;
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  font-size: var(--nu-font-size-xs);
+  cursor: pointer;
+}
+
+.nu-post__time--link:hover {
+  color: var(--nu-color-text-secondary);
+  text-decoration: underline;
+}
+
+.nu-post__text--openable {
+  cursor: pointer;
+}
+
+/* Why an action didn't do anything (e.g. "Join X to like or comment"). */
+.nu-post__notice {
+  margin: 0;
+  color: var(--nu-color-text-muted);
+  font-size: var(--nu-font-size-sm);
+}
+
 .nu-post__badge {
   color: var(--nu-color-warning);
   border: 1px solid currentColor;
@@ -189,7 +216,12 @@
 
 .nu-post__actions {
   display: flex;
-  gap: var(--nu-space-3);
+  flex-wrap: wrap;
+  column-gap: var(--nu-space-3);
+  row-gap: var(--nu-space-1);
+  /* The buttons carry their own vertical padding for a bigger tap target; pull the row back so
+     the card's spacing looks the same as before. */
+  margin-block: calc(var(--nu-space-1) * -1);
 }
 
 .nu-post__action {
@@ -211,17 +243,29 @@
   color: var(--nu-color-accent-2);
 }
 
+.nu-post__actions > .nu-post__action,
+.nu-post__actions > .nu-menu > .nu-post__action {
+  padding-block: var(--nu-space-1);
+  min-height: 28px;
+}
+
+.nu-post__action--unavailable {
+  opacity: 0.55;
+}
+
 .nu-post__action--danger:hover {
   color: var(--nu-color-danger);
 }
 
 .nu-feed__status {
-  margin: 0;
+  /* Block margins only: the column's own centering is its inline margins (.nu-feed > *). */
+  margin-block: 0;
   color: var(--nu-color-text-muted);
   text-align: center;
 }
 
-.nu-feed > .nu-feed__load-more {
+.nu-feed > .nu-feed__load-more,
+.nu-feed > .nu-feed__new-posts {
   width: auto;
 }
 
@@ -269,4 +313,149 @@
   display: flex;
   flex-direction: column;
   gap: var(--nu-space-2);
+}
+
+/* A content warning, standing in for the text and media it covers until "Show more". */
+.nu-post__warning {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--nu-space-2);
+  padding: var(--nu-space-2) var(--nu-space-3);
+  border: 1px solid var(--nu-color-border);
+  border-radius: var(--nu-radius-md);
+  background: var(--nu-color-bg-tertiary);
+  color: var(--nu-color-text-secondary);
+}
+
+.nu-post__warning-text {
+  flex: 1;
+  min-width: 0;
+  font-weight: 700;
+  color: var(--nu-color-text-primary);
+  overflow-wrap: anywhere;
+}
+
+.nu-post__warning-toggle {
+  appearance: none;
+  border: 1px solid var(--nu-color-border);
+  border-radius: var(--nu-radius-full);
+  background: var(--nu-color-bg-secondary);
+  padding: 2px var(--nu-space-3);
+  color: var(--nu-color-text-primary);
+  font: inherit;
+  font-size: var(--nu-font-size-xs);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+/* #tags in a post: a link to that tag's timeline. */
+.nu-hashtag {
+  appearance: none;
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: var(--nu-color-accent-2);
+  cursor: pointer;
+}
+
+.nu-hashtag:hover {
+  text-decoration: underline;
+}
+
+.nu-char-counter {
+  color: var(--nu-color-text-muted);
+  font-size: var(--nu-font-size-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.nu-char-counter--near {
+  color: var(--nu-color-warning);
+}
+
+.nu-char-counter--over {
+  color: var(--nu-color-danger);
+  font-weight: 700;
+}
+
+/* The ⋯ menu sits at the far end of the action row. */
+.nu-post__actions > .nu-menu:last-child {
+  margin-left: auto;
+}
+
+.nu-post__action--more {
+  padding-inline: var(--nu-space-1);
+}
+
+.nu-post__action--reposted {
+  color: var(--nu-color-accent-2);
+}
+
+/* A post's own page: the like and repost totals, above the thread. */
+.nu-post__stats {
+  margin: 0;
+  display: flex;
+  gap: var(--nu-space-4);
+  color: var(--nu-color-text-muted);
+  font-size: var(--nu-font-size-sm);
+}
+
+.nu-post__stat {
+  appearance: none;
+  border: none;
+  background: none;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+}
+
+button.nu-post__stat {
+  cursor: pointer;
+}
+
+button.nu-post__stat:hover {
+  text-decoration: underline;
+}
+
+.nu-post__stat strong {
+  color: var(--nu-color-text-primary);
+}
+
+.nu-quote-dialog__meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--nu-space-3);
+}
+
+/* "3 new posts": floats at the top of the timeline while you scroll, like any social app. */
+.nu-feed__new-posts {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--nu-space-1);
+  padding: var(--nu-space-1) var(--nu-space-4);
+  border: none;
+  border-radius: var(--nu-radius-full);
+  background: var(--nu-gradient-accent);
+  color: var(--nu-color-on-accent);
+  font: inherit;
+  font-size: var(--nu-font-size-sm);
+  font-weight: 800;
+  box-shadow: 0 4px 14px color-mix(in srgb, var(--nu-color-accent) 30%, transparent);
+  cursor: pointer;
+}
+
+.nu-feed__status--end {
+  opacity: 0.7;
+}
+
+/* Where infinite scroll watches for the end of the list. */
+.nu-feed__sentinel {
+  height: 1px;
+  flex: none;
 }

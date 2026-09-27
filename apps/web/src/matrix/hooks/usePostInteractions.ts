@@ -6,10 +6,12 @@ import {
   fetchComments,
   fetchLikes,
   fetchOlderComments,
+  fetchReposts,
   likePost,
   mergeNewestPage,
   sendComment,
   unlikePost,
+  type MyRepost,
   type OlderCursor,
   type PostComment,
   type ReplyTarget,
@@ -41,14 +43,18 @@ function limited<T>(task: () => Promise<T>): Promise<T> {
 type State = {
   likeCount: number;
   likesTruncated: boolean;
+  likers: string[];
   myLikeId?: string;
+  repostCount: number;
+  repostsTruncated: boolean;
+  myRepost?: MyRepost;
   /** Loaded so far, oldest first — the newest page, plus any older pages asked for. */
   comments: PostComment[];
   /** Set while older comments exist on the server that haven't been loaded. */
   older?: OlderCursor;
 };
 
-const EMPTY: State = { likeCount: 0, likesTruncated: false, comments: [] };
+const EMPTY: State = { likeCount: 0, likesTruncated: false, likers: [], repostCount: 0, repostsTruncated: false, comments: [] };
 
 /**
  * A post's likes and comments, and the actions on them. A card reads its likes and the newest page
@@ -70,13 +76,18 @@ export function usePostInteractions(roomId: string, postId: string, ownerId: str
 
   const reload = useCallback(async () => {
     try {
-      const [likes, newest] = await Promise.all([
+      const [likes, newest, reposts] = await Promise.all([
         limited(() => fetchLikes(mx, roomId, postId, postTs)),
         limited(() => fetchComments(mx, roomId, postId)),
+        // A server that can't answer this just shows no repost count.
+        limited(() => fetchReposts(mx, roomId, postId)).catch(() => undefined),
       ]);
       if (!alive.current) return;
       setState((prev) => ({
         ...likes,
+        repostCount: reposts?.repostCount ?? prev.repostCount,
+        repostsTruncated: reposts?.repostsTruncated ?? prev.repostsTruncated,
+        myRepost: reposts ? reposts.mine : prev.myRepost,
         comments: mergeNewestPage(prev.comments, newest.comments),
         older: pagedBack.current ? prev.older : newest.older,
       }));

@@ -1,65 +1,30 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react';
-import type { MatrixClient, RoomMember } from 'matrix-js-sdk';
+import { useRef, useState, type FormEvent } from 'react';
+import type { RoomMember } from 'matrix-js-sdk';
 import { Avatar } from '../../components/Avatar';
+import { useConfirm } from '../../components/ConfirmDialog';
 import { Icon } from '../../components/Icon';
 import { useMatrixClient } from '../../matrix/MatrixClientContext';
+import { useUserProfile } from '../../matrix/hooks/useUserProfile';
 import type { Emote } from '../../matrix/emotes';
-import { buildPostContent, type PostContent } from '../../matrix/feed';
+import { buildPostContent, POST_MAX_LENGTH, postLength, type PostContent } from '../../matrix/feed';
 import { buildMessageFormatting } from '../../matrix/messageFormatting';
 import { ACCEPTED_MEDIA_TYPES } from '../../matrix/postMedia';
 import type { PostComment, ReplyTarget } from '../../matrix/postInteractions';
 import { renderMessageText } from '../messaging/renderMessageText';
 import { useMentionAutocomplete, type MentionPerson } from '../messaging/useMentionAutocomplete';
+import { CharCounter, isOverLimit } from './CharCounter';
 import { formatPostTime } from './formatPostTime';
 import { PostMedia } from './PostMedia';
 import { StagedMediaPreviews, useStagedMedia } from './useStagedMedia';
 import './CommentThread.css';
-
-type Profile = { name: string; avatarUrl: string | null };
 
 /** On a post's own page: how many of the newest comments show at first, and how many more each
  *  "earlier" adds. */
 const PAGE_INITIAL_VISIBLE = 50;
 const REVEAL_STEP = 50;
 
-// Commenters on a feed you haven't joined aren't in any room this client has, so their names come
-// from the profile API — once per person per session.
-const profileCache = new Map<string, Promise<Profile>>();
-
-function lookupProfile(mx: MatrixClient, userId: string): Promise<Profile> {
-  let cached = profileCache.get(userId);
-  if (!cached) {
-    cached = mx
-      .getProfileInfo(userId)
-      .then((p) => ({ name: p.displayname || userId, avatarUrl: p.avatar_url ?? null }))
-      .catch(() => ({ name: userId, avatarUrl: null }));
-    profileCache.set(userId, cached);
-  }
-  return cached;
-}
-
-function useProfile(userId: string, members: RoomMember[]): Profile {
-  const mx = useMatrixClient();
-  const member = members.find((m) => m.userId === userId);
-  const known = member ? { name: member.name, avatarUrl: member.getMxcAvatarUrl() ?? null } : undefined;
-  const [fetched, setFetched] = useState<Profile>();
-  useEffect(() => {
-    if (known) return undefined;
-    let cancelled = false;
-    void lookupProfile(mx, userId).then((p) => {
-      if (!cancelled) setFetched(p);
-    });
-    return () => {
-      cancelled = true;
-    };
-    // `known` is derived from members; re-running on its identity would refetch every render.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mx, userId, !!known]);
-  return known ?? fetched ?? { name: userId, avatarUrl: null };
-}
-
 function ReplyingToLabel({ userId, members, role }: { userId: string; members: RoomMember[]; role: string }) {
-  const target = useProfile(userId, members);
+  const target = useUserProfile(userId, members);
   return (
     <span className="nu-comment__reply-to" data-nu-role={role}>
       <Icon name="reply" size={12} />
@@ -78,6 +43,7 @@ function CommentItem({
   onDelete,
   onReply,
   onReport,
+  onOpenProfile,
 }: {
   comment: PostComment;
   myUserId: string;
@@ -88,14 +54,26 @@ function CommentItem({
   onDelete: () => void;
   onReply: (target: ReplyTarget) => void;
   onReport?: () => void;
+  onOpenProfile?: (userId: string) => void;
 }) {
-  const author = useProfile(comment.sender, members);
+  const author = useUserProfile(comment.sender, members);
   return (
     <li className="nu-comment" data-nu-role="post-comment">
       <Avatar name={author.name} mxcUrl={author.avatarUrl} size={28} />
       <div className="nu-comment__body">
         <header className="nu-comment__meta">
-          <span className="nu-comment__author">{author.name}</span>
+          {onOpenProfile ? (
+            <button
+              type="button"
+              className="nu-comment__author nu-comment__author--link"
+              data-nu-role="post-comment-author"
+              onClick={() => onOpenProfile(comment.sender)}
+            >
+              {author.name}
+            </button>
+          ) : (
+            <span className="nu-comment__author">{author.name}</span>
+          )}
           <time className="nu-post__time" dateTime={new Date(comment.ts).toISOString()} title={new Date(comment.ts).toLocaleString()}>
             {formatPostTime(comment.ts)}
           </time>
@@ -165,6 +143,7 @@ export function CommentThread({
   cannotCommentReason,
   canRemoveAny,
   onReport,
+  onOpenProfile,
   mentionPeople = [],
   emotes = [],
   members = [],
@@ -187,6 +166,8 @@ export function CommentThread({
   canRemoveAny: boolean;
   /** Reports someone else's comment to the server's admins. */
   onReport?: (commentId: string) => void;
+  /** Opens a commenter's profile from their name. */
+  onOpenProfile?: (userId: string) => void;
   /** Who can be @mentioned: whoever a mention here can reach (the feed room's members). */
   mentionPeople?: MentionPerson[];
   emotes?: Emote[];
@@ -216,6 +197,7 @@ export function CommentThread({
   const media = useStagedMedia(setError);
   const [visible, setVisible] = useState(PAGE_INITIAL_VISIBLE);
   const mention = useMentionAutocomplete({ text, setText, textareaRef: inputRef, people: mentionPeople });
+  const { confirm, dialog: confirmDialog } = useConfirm();
 
   const inline = inlineLimit !== undefined && !!onViewAll;
   const shown = comments.slice(-(inline ? inlineLimit : visible));
@@ -239,7 +221,7 @@ export function CommentThread({
   const handleSubmit = async (evt: FormEvent) => {
     evt.preventDefault();
     const body = text.trim();
-    if ((!body && media.staged.length === 0) || sending || media.preparing) return;
+    if ((!body && media.staged.length === 0) || isOverLimit(body) || sending || media.preparing) return;
     setSending(true);
     setError(undefined);
     try {
@@ -257,7 +239,15 @@ export function CommentThread({
     }
   };
 
-  const handleDelete = async (commentId: string) => {
+  const handleDelete = async (commentId: string, mine: boolean) => {
+    const ok = await confirm({
+      title: 'Delete comment',
+      message: mine
+        ? 'Delete your comment? This can’t be undone.'
+        : 'Delete this comment for everyone? This can’t be undone.',
+      confirmLabel: 'Delete',
+    });
+    if (!ok) return;
     setError(undefined);
     try {
       await onDelete(commentId);
@@ -293,6 +283,7 @@ export function CommentThread({
 
   return (
     <section className="nu-comments" data-nu-role="post-comments">
+      {confirmDialog}
       {earlierControl}
       {shown.length > 0 && (
         <ul className="nu-comments__list">
@@ -305,7 +296,8 @@ export function CommentThread({
               canReply={canComment}
               emotes={emotes}
               members={members}
-              onDelete={() => void handleDelete(comment.eventId)}
+              onDelete={() => void handleDelete(comment.eventId, comment.sender === myUserId)}
+              onOpenProfile={onOpenProfile}
               {...(onReport && comment.sender !== myUserId && { onReport: () => onReport(comment.eventId) })}
               onReply={startReply}
             />
@@ -371,13 +363,15 @@ export function CommentThread({
               multiple
               onChange={media.addFiles}
             />
+            {/* Only near the cap: a counter on every short reply would be noise. */}
+            {postLength(text) > POST_MAX_LENGTH - 100 && <CharCounter text={text} />}
             <button
               type="submit"
               className="nu-button nu-button--primary nu-comments__send"
               data-nu-role="post-comment-send"
-              disabled={sending || media.preparing || (!text.trim() && media.staged.length === 0)}
+              disabled={sending || media.preparing || isOverLimit(text) || (!text.trim() && media.staged.length === 0)}
             >
-              {sending ? 'Sending…' : media.preparing ? 'Preparing…' : 'Reply'}
+              {sending ? 'Sending…' : media.preparing ? 'Preparing…' : replyingTo ? 'Reply' : 'Comment'}
             </button>
           </div>
           <StagedMediaPreviews staged={media.staged} onRemove={media.remove} role="post-comment-previews" />

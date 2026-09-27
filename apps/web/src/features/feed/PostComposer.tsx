@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { useAtomValue } from 'jotai';
+import { composerFocusAtom } from '../../app/state/feed';
 import { Icon } from '../../components/Icon';
 import { useMatrixClient } from '../../matrix/MatrixClientContext';
 import type { Emote } from '../../matrix/emotes';
@@ -10,10 +12,14 @@ import { publishToTarget, type PostTarget } from '../../matrix/postPublishing';
 import { useOwnProfile } from '../../matrix/hooks/useOwnProfile';
 import { useRoomMembers } from '../../matrix/hooks/useRoomMembers';
 import { membersAsPeople, useMentionAutocomplete } from '../messaging/useMentionAutocomplete';
+import { CharCounter, isOverLimit } from './CharCounter';
 import { StagedMediaPreviews, useStagedMedia } from './useStagedMedia';
 import './PostComposer.css';
 
 export type ComposerTarget = { id: string; label: string; isPublic: boolean; target: PostTarget };
+
+/** The last N-shortcut request a composer acted on (see the focus effect below). */
+let handledFocusRequest = 0;
 
 /** Who will be able to read a post sent to this target — shown under the box, always. */
 function audienceHint(target: ComposerTarget | undefined, privately: boolean): string {
@@ -59,6 +65,10 @@ export function PostComposer({
   const [privately, setPrivately] = useState(false);
   const [posting, setPosting] = useState(false);
   const [error, setError] = useState<string>();
+  // A content warning: open once "CW" is pressed, and sent only if it has text.
+  const [warningOpen, setWarningOpen] = useState(false);
+  const [warning, setWarning] = useState('');
+  const [sensitive, setSensitive] = useState(false);
   const media = useStagedMedia(setError);
   const { staged, preparing } = media;
 
@@ -84,10 +94,25 @@ export function PostComposer({
     if (!targets.some((t) => t.id === targetId) && targets[0]) setTargetId(targets[0].id);
   }, [targets, targetId]);
 
+  // The N shortcut (useComposeShortcut): whichever composer is actually on screen takes focus. A
+  // feed kept mounted under a post or profile is hidden, and its composer stays out of it. A
+  // composer that only appears because of the request (the global feed opening, say) takes it as
+  // it mounts; one that mounts later doesn't, since the request is marked handled.
+  const focusRequest = useAtomValue(composerFocusAtom);
+  useEffect(() => {
+    const input = textareaRef.current;
+    if (focusRequest <= handledFocusRequest || !input || input.offsetParent === null) return;
+    handledFocusRequest = focusRequest;
+    input.focus();
+    input.scrollIntoView({ block: 'nearest' });
+  }, [focusRequest]);
+
+  const tooLong = isOverLimit(text);
+
   const handleSubmit = async (evt: FormEvent) => {
     evt.preventDefault();
     const body = text.trim();
-    if ((!body && staged.length === 0) || posting || preparing || !target || waitingOnPublicness) return;
+    if ((!body && staged.length === 0) || tooLong || posting || preparing || !target || waitingOnPublicness) return;
     setPosting(true);
     setError(undefined);
     try {
@@ -102,10 +127,15 @@ export function PostComposer({
         onPrivateSaved?.();
       } else {
         const { formattedBody, mentionedUserIds } = buildMessageFormatting(body, emotes, mention.candidates());
-        const source = await publishToTarget(
+        const { source } = await publishToTarget(
           mx,
           target.target,
-          buildPostContent(body, formattedBody, { attachments, mentions: mentionedUserIds }),
+          buildPostContent(body, formattedBody, {
+            attachments,
+            mentions: mentionedUserIds,
+            ...(warningOpen && { warning }),
+            sensitive,
+          }),
           displayName || mx.getUserId() || '',
           target.isPublic
         );
@@ -114,6 +144,9 @@ export function PostComposer({
       setText('');
       mention.reset();
       media.clear();
+      setWarning('');
+      setWarningOpen(false);
+      setSensitive(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Couldn’t post that');
     } finally {
@@ -126,6 +159,17 @@ export function PostComposer({
   return (
     <form className="nu-post-composer" onSubmit={handleSubmit} data-nu-role="feed-composer">
       {mention.dropdown}
+      {warningOpen && (
+        <input
+          className="nu-post-composer__warning"
+          data-nu-role="feed-composer-warning"
+          value={warning}
+          onChange={(e) => setWarning(e.target.value)}
+          placeholder="Content warning — what the post is about (spoilers, food, …)"
+          maxLength={200}
+          autoFocus
+        />
+      )}
       <textarea
         ref={textareaRef}
         className="nu-post-composer__input"
@@ -135,7 +179,14 @@ export function PostComposer({
           setText(e.target.value);
           mention.update(e.target.value, e.target.selectionStart ?? e.target.value.length);
         }}
-        onKeyDown={(e) => void mention.handleKeyDown(e)}
+        onKeyDown={(e) => {
+          if (mention.handleKeyDown(e)) return;
+          // Ctrl/Cmd+Enter posts; plain Enter stays a new line, since posts run to paragraphs.
+          if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+            e.preventDefault();
+            e.currentTarget.form?.requestSubmit();
+          }
+        }}
         placeholder={placeholder}
         rows={3}
       />
@@ -152,6 +203,25 @@ export function PostComposer({
         >
           <Icon name="image" size={18} />
         </button>
+        <button
+          type="button"
+          className={warningOpen ? 'nu-post-composer__cw nu-post-composer__cw--on' : 'nu-post-composer__cw'}
+          data-nu-role="feed-composer-cw"
+          title={warningOpen ? 'Remove the content warning' : 'Add a content warning'}
+          aria-pressed={warningOpen}
+          onClick={() => {
+            setWarningOpen((open) => !open);
+            setWarning('');
+          }}
+        >
+          CW
+        </button>
+        {staged.length > 0 && (
+          <label className="nu-post-composer__private" data-nu-role="feed-composer-sensitive" title="Blur the media until someone chooses to see it">
+            <input type="checkbox" checked={sensitive} onChange={(e) => setSensitive(e.target.checked)} />
+            Sensitive
+          </label>
+        )}
         <input
           ref={fileInputRef}
           className="nu-post-composer__file"
@@ -187,11 +257,12 @@ export function PostComposer({
             Only me
           </label>
         )}
+        <CharCounter text={text} />
         <button
           type="submit"
           className="nu-button nu-button--primary nu-post-composer__submit"
           data-nu-role="feed-composer-submit"
-          disabled={posting || preparing || waitingOnPublicness || (!text.trim() && staged.length === 0)}
+          disabled={posting || preparing || waitingOnPublicness || tooLong || (!text.trim() && staged.length === 0)}
         >
           {posting ? 'Posting…' : preparing ? 'Preparing…' : privately && canPrivate ? 'Save' : 'Post'}
         </button>

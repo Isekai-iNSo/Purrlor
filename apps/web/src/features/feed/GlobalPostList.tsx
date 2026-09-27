@@ -1,4 +1,3 @@
-import { useState } from 'react';
 import { useSetAtom } from 'jotai';
 import {
   globalFeedOpenAtom,
@@ -7,13 +6,11 @@ import {
   selectedSpaceIdAtom,
   selectedSpaceViewAtom,
 } from '../../app/state/selection';
-import { Icon } from '../../components/Icon';
 import { useMatrixClient } from '../../matrix/MatrixClientContext';
-import { deletePost, readPost, repostOfPost, type PostOrigin, type RepostOf } from '../../matrix/feed';
+import { deletePost, readPost, repostOfPost, type PostOrigin } from '../../matrix/feed';
 import type { FeedSource, GlobalPost } from '../../matrix/globalFeed';
 import { InteractivePost } from './InteractivePost';
 import type { ComposerTarget } from './PostComposer';
-import { RepostDialog } from './RepostDialog';
 import { repostTargetsFor } from './useComposerTargets';
 
 /**
@@ -39,8 +36,6 @@ export function GlobalPostList({
   const setSelectedSpaceId = useSetAtom(selectedSpaceIdAtom);
   const setSelectedRoomId = useSetAtom(selectedRoomIdAtom);
   const setSpaceView = useSetAtom(selectedSpaceViewAtom);
-  const [reposting, setReposting] = useState<{ repostOf: RepostOf; targets: ComposerTarget[] }>();
-  const [error, setError] = useState<string>();
 
   const openSpacePosts = (origin: PostOrigin) => {
     if (origin.kind !== 'space') return;
@@ -55,22 +50,8 @@ export function GlobalPostList({
   // Space's feeds only let that Space's members in (restricted join rule, feed.ts).
   const canInteractWith = (origin: PostOrigin) => origin.kind === 'global' || canOpen(origin);
 
-  const handleDelete = async (post: GlobalPost) => {
-    setError(undefined);
-    try {
-      await deletePost(mx, post.source.roomId, post.eventId);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Couldn’t delete that post');
-    }
-  };
-
   return (
     <>
-      {error && (
-        <p className="nu-field__error" data-nu-role="feed-error">
-          {error}
-        </p>
-      )}
       {posts.map((post) => {
         const content = readPost(post.event);
         if (!content) return null;
@@ -87,7 +68,7 @@ export function GlobalPostList({
             isPublic={source.isPublic}
             canInteract={canInteractWith(source.origin)}
             cannotInteractReason={
-              source.origin.kind === 'space' ? `Join ${source.origin.spaceName} to like or comment.` : undefined
+              source.origin.kind === 'space' ? `Join ${source.origin.spaceName} to like, comment or report.` : undefined
             }
             content={content}
             edited={!!post.event.replacingEventId()}
@@ -98,49 +79,27 @@ export function GlobalPostList({
             onOpenProfile={setProfileUserId}
             onOpenOrigin={openSpacePosts}
             canOpenOrigin={canOpen}
-            onRepost={
-              repostTargets.length > 0
-                ? () =>
-                    setReposting({
-                      repostOf: repostOfPost(
-                        {
-                          roomId: source.roomId,
-                          eventId: post.eventId,
-                          sender: source.owner,
-                          senderName: source.ownerName,
-                          origin: source.origin,
-                          ts: post.ts,
-                        },
-                        content
-                      ),
-                      targets: repostTargets,
-                    })
-                : undefined
-            }
-            extraActions={
-              mine && (
-                <button
-                  type="button"
-                  className="nu-post__action nu-post__action--danger"
-                  data-nu-role="feed-post-delete"
-                  onClick={() => handleDelete(post)}
-                >
-                  <Icon name="trash" size={14} />
-                  Delete
-                </button>
-              )
-            }
+            {...(repostTargets.length > 0 && {
+              repost: {
+                repostOf: repostOfPost(
+                  {
+                    roomId: source.roomId,
+                    eventId: post.eventId,
+                    sender: source.owner,
+                    senderName: source.ownerName,
+                    origin: source.origin,
+                    ts: post.ts,
+                  },
+                  content
+                ),
+                targets: repostTargets,
+              },
+            })}
+            onReposted={onReposted}
+            {...(mine && { onDelete: () => deletePost(mx, source.roomId, post.eventId) })}
           />
         );
       })}
-      {reposting && (
-        <RepostDialog
-          repostOf={reposting.repostOf}
-          targets={reposting.targets}
-          onClose={() => setReposting(undefined)}
-          onReposted={onReposted}
-        />
-      )}
     </>
   );
 }

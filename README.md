@@ -87,12 +87,13 @@ Every Space has a **Posts** page (top of its channel list), and the globe under 
 **global feed**: public posts from across the server, or just the people and Spaces you follow.
 Post text, images or video to Global or any of your Spaces; keep a post to yourself with "Only me".
 Under any post: **Like**, **Comment** (text, images and video, like a post), **Reply** to a
-specific comment, **Repost**, and the flag to **Report** it to the server's admins. Your own posts
-also get **Edit**. A Space's moderators can remove any post or comment in that Space. `@mention`
-people in posts and comments to notify them. Mentions land in your Mention Inbox, and opening one
-takes you to the post. A timeline shows a post's newest 3 comments; **View all** or
-**Open** takes you to the post's own page for the whole thread. Click any author's name for their
-profile.
+specific comment, and **Repost** (instantly, or **Quote** it with your own words). The **⋯** menu
+has the rest: **Report**, **See who liked**, and on your own posts **Edit**, **Pin to profile** and
+**Delete**. A Space's moderators can remove any post or comment in that Space. `@mention` people
+and use `#tags`; a tag opens every post with it. A timeline shows a post's newest 3 comments; tap a
+post's time or text for its own page with the whole thread. The global feed's **Activity** tab
+shows who liked, commented on, reposted or quoted your posts, followed you, or mentioned you.
+Click any name for their profile: posts, media, who they follow and who follows them.
 
 A Space's posts reach the global feed only when the Space is **listed in Discover**: Space
 Settings → Visibility → "Public space". A public join link on its own keeps posts members-only.

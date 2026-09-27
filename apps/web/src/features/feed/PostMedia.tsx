@@ -1,4 +1,5 @@
 import { useState, type CSSProperties } from 'react';
+import { Icon } from '../../components/Icon';
 import { Lightbox } from '../../components/Lightbox';
 import { useAttachmentUrl } from '../../matrix/hooks/useAttachmentUrl';
 import { attachmentMxc, type PostAttachment } from '../../matrix/postMedia';
@@ -56,15 +57,36 @@ function MediaItem({ attachment, single }: { attachment: PostAttachment; single:
   );
 }
 
-/** A post's images and videos: one shown at its own shape, two to four as a grid. */
-export function PostMedia({ attachments }: { attachments: PostAttachment[] }) {
+/**
+ * A post's images and videos: one shown at its own shape, two to four as a grid. Media its author
+ * marked sensitive is blurred, with nothing playable or openable, until the reader asks to see it.
+ */
+export function PostMedia({ attachments, sensitive = false }: { attachments: PostAttachment[]; sensitive?: boolean }) {
+  const [revealed, setRevealed] = useState(false);
   if (attachments.length === 0) return null;
   const single = attachments.length === 1;
+  const covered = sensitive && !revealed;
   return (
-    <div className={`nu-post-media nu-post-media--count-${attachments.length}`} data-nu-role="post-media">
+    <div
+      className={[
+        'nu-post-media',
+        `nu-post-media--count-${attachments.length}`,
+        covered && 'nu-post-media--covered',
+      ]
+        .filter(Boolean)
+        .join(' ')}
+      data-nu-role="post-media"
+    >
       {attachments.map((attachment) => (
         <MediaItem key={attachmentMxc(attachment)} attachment={attachment} single={single} />
       ))}
+      {covered && (
+        <button type="button" className="nu-post-media__reveal" data-nu-role="post-media-reveal" onClick={() => setRevealed(true)}>
+          <Icon name="eyeOff" size={18} />
+          Sensitive media
+          <span className="nu-post-media__reveal-hint">Show</span>
+        </button>
+      )}
     </div>
   );
 }

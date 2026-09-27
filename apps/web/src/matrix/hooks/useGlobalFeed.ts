@@ -5,6 +5,7 @@ import { applyPostEdits, editTargetOf, followSpaceFeeds } from '../feed';
 import {
   dedupeSources,
   fetchFeedPage,
+  fetchNewestPosts,
   GLOBAL_FEED_CONCURRENCY,
   listDirectory,
   loadProfileSource,
@@ -25,6 +26,12 @@ import {
 export type GlobalFeed = {
   /** Every post from every readable source. Views narrow it with `filterPosts`. */
   posts: GlobalPost[];
+  /** Posts that arrived after the timeline was shown, held back so nothing moves under the
+   *  reader — the "N new posts" pill. `showNew` puts them in. Your own posts skip the wait. */
+  pending: GlobalPost[];
+  showNew: () => void;
+  /** Every feed being read — profile sources carry who their owner follows (follower counts). */
+  sources: FeedSource[];
   loading: boolean;
   loadingMore: boolean;
   hasMore: boolean;
@@ -47,6 +54,9 @@ export type GlobalFeed = {
 /** People and Spaces to read whatever the directory caps say: follows, or the profile being viewed. */
 export type Pinned = { users: string[]; spaces: string[] };
 const NOTHING_PINNED: Pinned = { users: [], spaces: [] };
+
+/** How often feeds this client isn't in are asked for new posts. */
+const NEW_POSTS_CHECK_MS = 60_000;
 
 /**
  * Everything the global feed, the Following timeline, and profiles read from — see
@@ -74,8 +84,12 @@ export function useGlobalFeed(enabled: boolean, pinnedInput: Pinned = NOTHING_PI
   const [unreadableSpaces, setUnreadableSpaces] = useState(0);
   const [error, setError] = useState<string>();
   const [generation, setGeneration] = useState(0);
+  const [pending, setPending] = useState<GlobalPost[]>([]);
+  const [sources, setSources] = useState<FeedSource[]>([]);
   const tokensRef = useRef(new Map<string, string>());
   const sourcesRef = useRef(new Map<string, FeedSource>());
+  // What's shown or waiting, for telling a new post from one already there.
+  const knownIdsRef = useRef(new Set<string>());
   const busyRef = useRef(false);
   // Every post edit seen so far: an edit can arrive on a different page from its post.
   const editsRef = useRef<MatrixEvent[]>([]);
@@ -98,7 +112,9 @@ export function useGlobalFeed(enabled: boolean, pinnedInput: Pinned = NOTHING_PI
     initialLoadRef.current = true;
     tokensRef.current = new Map();
     sourcesRef.current = new Map();
+    knownIdsRef.current = new Set();
     editsRef.current = [];
+    setPending([]);
     busyRef.current = true;
     setLoading(true);
     setError(undefined);
@@ -164,6 +180,7 @@ export function useGlobalFeed(enabled: boolean, pinnedInput: Pinned = NOTHING_PI
           ...privateJoinedSpaceSources(mx, allPublicIds),
         ]).slice(0, MAX_FEEDS);
         sources.forEach((source) => sourcesRef.current.set(source.roomId, source));
+        setSources([...sourcesRef.current.values()]);
 
         const pages = await mapWithConcurrency(sources, GLOBAL_FEED_CONCURRENCY, (source) => fetchFeedPage(mx, source));
         if (cancelled) return;
@@ -174,6 +191,7 @@ export function useGlobalFeed(enabled: boolean, pinnedInput: Pinned = NOTHING_PI
           editsRef.current.push(...page.edits);
           if (page.nextToken) tokensRef.current.set(sources[index].roomId, page.nextToken);
         });
+        merged.forEach((post) => knownIdsRef.current.add(post.eventId));
         setPosts(withEdits(merged));
         setHasMore(tokensRef.current.size > 0);
       } catch (err) {
@@ -196,12 +214,18 @@ export function useGlobalFeed(enabled: boolean, pinnedInput: Pinned = NOTHING_PI
         setPosts((prev) => (applyPostEdits(prev.map((post) => post.event), editsRef.current) ? [...prev] : prev));
         return;
       }
-      const incoming = postsFromEvents(source, [event]);
-      if (incoming.length) setPosts((prev) => withEdits(mergePosts(prev, incoming)));
+      const incoming = postsFromEvents(source, [event]).filter((post) => !knownIdsRef.current.has(post.eventId));
+      if (!incoming.length) return;
+      incoming.forEach((post) => knownIdsRef.current.add(post.eventId));
+      // Your own post goes straight in — you just made it and expect to see it.
+      if (event.getSender() === mx.getUserId()) setPosts((prev) => withEdits(mergePosts(prev, incoming)));
+      else setPending((prev) => withEdits(mergePosts(prev, incoming)));
     };
     const onRedaction = (redaction: MatrixEvent) => {
       const redacted = redaction.event.redacts ?? redaction.getContent().redacts;
-      if (redacted) setPosts((prev) => prev.filter((post) => post.eventId !== redacted));
+      if (!redacted) return;
+      setPosts((prev) => prev.filter((post) => post.eventId !== redacted));
+      setPending((prev) => prev.filter((post) => post.eventId !== redacted));
     };
     mx.on(RoomEvent.Timeline, onTimeline);
     mx.on(RoomEvent.Redaction, onRedaction);
@@ -225,6 +249,7 @@ export function useGlobalFeed(enabled: boolean, pinnedInput: Pinned = NOTHING_PI
       pages.forEach((page, index) => {
         const [roomId] = pending[index];
         if (!page) return; // keeps its token, so the next "load older" retries it
+        page.posts.forEach((post) => knownIdsRef.current.add(post.eventId));
         incoming = incoming.concat(page.posts);
         editsRef.current.push(...page.edits);
         if (page.nextToken) tokensRef.current.set(roomId, page.nextToken);
@@ -239,19 +264,68 @@ export function useGlobalFeed(enabled: boolean, pinnedInput: Pinned = NOTHING_PI
 
   const refresh = useCallback(() => setGeneration((n) => n + 1), []);
 
+  const showNew = useCallback(() => {
+    setPending((waiting) => {
+      if (waiting.length) setPosts((prev) => withEdits(mergePosts(prev, waiting)));
+      return [];
+    });
+  }, [withEdits]);
+
   const addSource = useCallback(
     (source: FeedSource) => {
       if (sourcesRef.current.has(source.roomId)) return;
       sourcesRef.current.set(source.roomId, source);
+      setSources([...sourcesRef.current.values()]);
       void fetchFeedPage(mx, source)
         .then((page) => {
           editsRef.current.push(...page.edits);
+          // Arriving from something you did (your first post there, or following someone): shown
+          // at once rather than waiting behind the pill.
+          page.posts.forEach((post) => knownIdsRef.current.add(post.eventId));
           setPosts((prev) => withEdits(mergePosts(prev, page.posts)));
         })
         .catch(() => undefined);
     },
     [mx, withEdits]
   );
+
+  // Feeds this client is in update live (onTimeline, above). The rest are read over plain
+  // /messages, so they're asked for their newest posts now and then — only while the window is
+  // actually being looked at, and never over a load already in progress.
+  useEffect(() => {
+    if (!enabled) return undefined;
+    let checking = false;
+    const check = async () => {
+      if (checking || busyRef.current || document.visibilityState !== 'visible') return;
+      checking = true;
+      try {
+        const unjoined = [...sourcesRef.current.values()].filter(
+          (source) => mx.getRoom(source.roomId)?.getMyMembership() !== 'join'
+        );
+        const pages = await mapWithConcurrency(unjoined, GLOBAL_FEED_CONCURRENCY, (source) => fetchNewestPosts(mx, source));
+        const fresh: GlobalPost[] = [];
+        let edited = false;
+        pages.forEach((page) => {
+          if (!page) return;
+          if (page.edits.length) {
+            editsRef.current.push(...page.edits);
+            edited = true;
+          }
+          page.posts.forEach((post) => {
+            if (knownIdsRef.current.has(post.eventId)) return;
+            knownIdsRef.current.add(post.eventId);
+            fresh.push(post);
+          });
+        });
+        if (fresh.length) setPending((prev) => withEdits(mergePosts(prev, fresh)));
+        if (edited) setPosts((prev) => (applyPostEdits(prev.map((post) => post.event), editsRef.current) ? [...prev] : prev));
+      } finally {
+        checking = false;
+      }
+    };
+    const timer = setInterval(() => void check(), NEW_POSTS_CHECK_MS);
+    return () => clearInterval(timer);
+  }, [mx, enabled, generation, withEdits]);
 
   // Following someone new mid-session adds just their feeds, rather than reloading the timeline.
   // During the initial load there's nothing to add to yet: that load reads pinnedRef itself, and
@@ -282,6 +356,9 @@ export function useGlobalFeed(enabled: boolean, pinnedInput: Pinned = NOTHING_PI
 
   return {
     posts,
+    pending,
+    showNew,
+    sources,
     loading,
     loadingMore,
     hasMore,

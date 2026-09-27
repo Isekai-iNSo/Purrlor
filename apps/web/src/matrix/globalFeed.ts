@@ -2,15 +2,16 @@ import {
   Direction,
   EventType,
   MatrixEvent,
+  Method,
   RelationType,
   RoomType,
   type IPublicRoomsChunkRoom,
   type MatrixClient,
   type Room,
 } from 'matrix-js-sdk';
-import { editTargetOf, FEED_ROOM_MEMBER_KEY, isPostEvent, listSpaceFeeds, type PostOrigin } from './feed';
+import { editTargetOf, FEED_ROOM_MEMBER_KEY, isPostEvent, listSpaceFeeds, POST_EVENT_TYPE, type PostOrigin } from './feed';
 import { getExtendedProfile } from './extendedProfile';
-import { getOwnProfileRoomId, PROFILE_ROOM_TYPE, readProfileOwner } from './profileFeed';
+import { getOwnProfileRoomId, PROFILE_ROOM_TYPE, readProfileFollows, readProfileOwner } from './profileFeed';
 import { isListedInDirectory } from './spaceDirectory';
 
 /**
@@ -70,6 +71,8 @@ export type FeedSource = {
   origin: PostOrigin;
   /** Public places only: a listed Space, or anyone's profile feed. */
   isPublic: boolean;
+  /** Profile feeds only: who the owner follows, as published on their profile (profileFeed.ts). */
+  follows?: string[];
 };
 
 export type GlobalPost = {
@@ -141,6 +144,7 @@ export function profileSourceFromState(roomId: string, events: RawStateEvent[]):
     ...(typeof member.avatar_url === 'string' && member.avatar_url && { ownerAvatarUrl: member.avatar_url }),
     origin: { kind: 'global' },
     isPublic: true,
+    follows: readProfileFollows(events),
   };
 }
 
@@ -350,4 +354,22 @@ export async function fetchFeedPage(mx: MatrixClient, source: FeedSource, from?:
   const events = chunk.map((raw) => new MatrixEvent(raw));
   const nextToken = response.end && chunk.length ? response.end : undefined;
   return { posts: postsFromEvents(source, events), edits: editsFromRaw(chunk as Record<string, any>[]), nextToken };
+}
+
+/** How many of a feed's newest posts a check for new ones reads. */
+const NEWEST_CHECK_SIZE = 10;
+
+/**
+ * A feed's newest few posts (and edits), for noticing new ones in a feed this client isn't in —
+ * those don't sync, so the global feed asks now and then. Filtered to posts server-side, so a busy
+ * run of likes and comments doesn't hide a new post behind them.
+ */
+export async function fetchNewestPosts(mx: MatrixClient, source: FeedSource): Promise<{ posts: GlobalPost[]; edits: MatrixEvent[] }> {
+  const res = await mx.http.authedRequest<{ chunk?: Record<string, any>[] }>(
+    Method.Get,
+    `/rooms/${encodeURIComponent(source.roomId)}/messages`,
+    { dir: Direction.Backward, limit: String(NEWEST_CHECK_SIZE), filter: JSON.stringify({ types: [POST_EVENT_TYPE] }) }
+  );
+  const chunk = res.chunk ?? [];
+  return { posts: postsFromEvents(source, chunk.map((raw) => new MatrixEvent(raw))), edits: editsFromRaw(chunk) };
 }

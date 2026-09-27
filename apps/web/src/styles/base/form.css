@@ -141,6 +141,20 @@
   color: var(--nu-color-text-primary);
 }
 
+.nu-button--danger {
+  background: var(--nu-color-danger);
+  color: #fff;
+}
+
+.nu-button--danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--nu-color-danger) 85%, #000);
+}
+
+.nu-button--danger:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 /* File picker — a styled <label> standing in for the browser's own file input, with the real
    <input type="file"> stretched invisibly across it so a click anywhere on the label opens the
    picker. Pair with .nu-button/.nu-button--secondary for the visual treatment.

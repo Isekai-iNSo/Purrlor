@@ -25,7 +25,17 @@ const PROFILE_KEYS = {
   profileRoom: 'xyz.nekous.profile_room',
   // Your word for "typing" in the typing indicator — "Alice is yelling…" (typingVerb.ts).
   typingVerb: 'xyz.nekous.typing_verb',
+  // The post pinned to the top of your profile: `{ room_id, event_id }`. Only a post anyone can
+  // read (Global, or a public Space) can be pinned, since the profile is public.
+  pinnedPost: 'xyz.nekous.pinned_post',
 } as const;
+
+export type PinnedPostRef = { roomId: string; eventId: string };
+
+function readPinnedPost(raw: unknown): PinnedPostRef | undefined {
+  const r = raw as { room_id?: unknown; event_id?: unknown } | null;
+  return r && typeof r.room_id === 'string' && typeof r.event_id === 'string' ? { roomId: r.room_id, eventId: r.event_id } : undefined;
+}
 
 export type ExtendedProfile = {
   bio?: string;
@@ -33,6 +43,7 @@ export type ExtendedProfile = {
   avatarAnimated?: boolean;
   profileRoom?: string;
   typingVerb?: string;
+  pinnedPost?: PinnedPostRef;
 };
 
 /** Server support is a per-deployment constant, not something that changes mid-session — cached
@@ -58,6 +69,7 @@ export async function getExtendedProfile(mx: MatrixClient, userId: string): Prom
       avatarAnimated: raw[PROFILE_KEYS.avatarAnimated] === true,
       profileRoom: typeof raw[PROFILE_KEYS.profileRoom] === 'string' ? (raw[PROFILE_KEYS.profileRoom] as string) : undefined,
       typingVerb: typeof raw[PROFILE_KEYS.typingVerb] === 'string' ? (raw[PROFILE_KEYS.typingVerb] as string) : undefined,
+      pinnedPost: readPinnedPost(raw[PROFILE_KEYS.pinnedPost]),
     };
   } catch {
     return {};
@@ -122,4 +134,10 @@ export function isAnimatableImageType(mimeType: string): boolean {
 export async function setAvatarAnimated(mx: MatrixClient, animated: boolean): Promise<void> {
   if (animated) await mx.setExtendedProfileProperty(PROFILE_KEYS.avatarAnimated, true);
   else await mx.deleteExtendedProfileProperty(PROFILE_KEYS.avatarAnimated).catch(() => {});
+}
+
+/** Pins a post to the top of your profile, or unpins with `null`. */
+export async function setPinnedPost(mx: MatrixClient, post: PinnedPostRef | null): Promise<void> {
+  if (post) await mx.setExtendedProfileProperty(PROFILE_KEYS.pinnedPost, { room_id: post.roomId, event_id: post.eventId });
+  else await mx.deleteExtendedProfileProperty(PROFILE_KEYS.pinnedPost).catch(() => {});
 }

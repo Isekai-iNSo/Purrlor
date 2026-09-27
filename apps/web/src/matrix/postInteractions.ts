@@ -47,6 +47,20 @@ export const COMMENT_EVENT_TYPE = 'xyz.nekous.comment';
 export const LIKE_KEY = '❤️';
 const REPLY_TO_KEY = 'xyz.nekous.reply_to';
 
+/**
+ * A repost's marker on the original. The repost itself lives in the reposter's own feed (feed.ts),
+ * which the original's author may never read, so reposting also drops this small event into the
+ * *original's* room, related to the post like a like is. It's what counts reposts, what tells the
+ * author (activity.ts), and what knows you've reposted something so the button can undo it. It
+ * names the repost it stands for, so undoing deletes both.
+ *
+ * Best-effort: sending it needs membership of the original's room, which a Space feed only allows
+ * that Space's members. A public Space's post reposted by an outsider has no marker, so it isn't
+ * counted — the repost itself still goes out.
+ */
+export const REPOST_RECEIPT_TYPE = 'xyz.nekous.repost';
+const REPOST_RECEIPT_KEY = 'xyz.nekous.repost_event';
+
 /** The comment a reply answers, and who wrote it. */
 export type ReplyTarget = { eventId: string; sender: string };
 
@@ -60,6 +74,8 @@ function readReplyTo(raw: unknown): ReplyTarget | undefined {
 
 export type PostInteractions = {
   likeCount: number;
+  /** Who liked it, in the order read (newest first). */
+  likers: string[];
   /** Your own like's event ID — what un-liking redacts. */
   myLikeId?: string;
   /** Oldest first. */
@@ -173,10 +189,16 @@ export function summarizeRelations(events: RawRelationEvent[], postId: string, m
   }
 
   comments.sort((a, b) => a.ts - b.ts);
-  return { likeCount: likers.size, myLikeId: likers.get(myUserId), comments };
+  return { likeCount: likers.size, likers: [...likers.keys()], myLikeId: likers.get(myUserId), comments };
 }
 
-export type LikeSummary = { likeCount: number; myLikeId?: string; /** More likes exist than were counted. */ likesTruncated: boolean };
+export type LikeSummary = {
+  likeCount: number;
+  likers: string[];
+  myLikeId?: string;
+  /** More likes exist than were counted. */
+  likesTruncated: boolean;
+};
 
 export async function fetchLikes(mx: MatrixClient, roomId: string, postId: string, postTs: number): Promise<LikeSummary> {
   const first = await mx.fetchRelations(roomId, postId, RelationType.Annotation, EventType.Reaction, { limit: 100 });
@@ -188,8 +210,54 @@ export async function fetchLikes(mx: MatrixClient, roomId: string, postId: strin
     events.push(...older.events);
     next = older.next;
   }
-  const { likeCount, myLikeId } = summarizeRelations(events, postId, mx.getUserId() ?? '');
-  return { likeCount, myLikeId, likesTruncated: !!next };
+  const { likeCount, likers, myLikeId } = summarizeRelations(events, postId, mx.getUserId() ?? '');
+  return { likeCount, likers, myLikeId, likesTruncated: !!next };
+}
+
+/** Your own marker, and the repost it stands for — what undoing a repost deletes. */
+export type MyRepost = { receiptId: string; roomId: string; eventId: string };
+
+export type RepostSummary = {
+  /** People who reposted it (one each, however many times). */
+  repostCount: number;
+  repostsTruncated: boolean;
+  mine?: MyRepost;
+};
+
+/** Repost markers out of a post's raw relations. Pure, so it's tested without a server. */
+export function summarizeReposts(events: RawRelationEvent[], postId: string, myUserId: string): Omit<RepostSummary, 'repostsTruncated'> {
+  const reposters = new Set<string>();
+  let mine: MyRepost | undefined;
+  for (const event of events) {
+    if (event.type !== REPOST_RECEIPT_TYPE || !relatesTo(event, postId, RelationType.Reference)) continue;
+    reposters.add(event.sender);
+    const target = event.content[REPOST_RECEIPT_KEY] as { room_id?: unknown; event_id?: unknown } | undefined;
+    if (!mine && event.sender === myUserId && typeof target?.room_id === 'string' && typeof target.event_id === 'string') {
+      mine = { receiptId: event.event_id, roomId: target.room_id, eventId: target.event_id };
+    }
+  }
+  return { repostCount: reposters.size, ...(mine && { mine }) };
+}
+
+/** One page of markers is plenty: past it the count reads "100+". */
+export async function fetchReposts(mx: MatrixClient, roomId: string, postId: string): Promise<RepostSummary> {
+  const res = await mx.fetchRelations(roomId, postId, RelationType.Reference, REPOST_RECEIPT_TYPE, { limit: 100 });
+  const chunk = res.chunk as unknown as RawRelationEvent[];
+  return { ...summarizeReposts(chunk, postId, mx.getUserId() ?? ''), repostsTruncated: !!res.next_batch && chunk.length > 0 };
+}
+
+export async function sendRepostReceipt(
+  mx: MatrixClient,
+  roomId: string,
+  postId: string,
+  ownerId: string,
+  repost: { roomId: string; eventId: string; quote: boolean }
+): Promise<void> {
+  await ensureJoined(mx, roomId, ownerId);
+  await mx.sendEvent(roomId, REPOST_RECEIPT_TYPE as any, {
+    [REPOST_RECEIPT_KEY]: { room_id: repost.roomId, event_id: repost.eventId, quote: repost.quote },
+    'm.relates_to': { rel_type: RelationType.Reference, event_id: postId },
+  } as any);
 }
 
 export type CommentPage = {

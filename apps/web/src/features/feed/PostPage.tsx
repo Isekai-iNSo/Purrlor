@@ -1,12 +1,10 @@
-import { useState } from 'react';
 import { useSetAtom } from 'jotai';
 import { openPostAtom, profileUserIdAtom, type OpenPost } from '../../app/state/selection';
 import { Icon } from '../../components/Icon';
 import { useMatrixClient } from '../../matrix/MatrixClientContext';
-import { deletePost, repostOfPost, type RepostOf } from '../../matrix/feed';
+import { deletePost, repostOfPost } from '../../matrix/feed';
 import { usePublicSpaceIds } from '../../matrix/hooks/usePublicSpaceIds';
 import { InteractivePost } from './InteractivePost';
-import { RepostDialog } from './RepostDialog';
 import { repostTargetsFor, useComposerTargets } from './useComposerTargets';
 import './FeedView.css';
 
@@ -23,20 +21,8 @@ export function PostPage({ post }: { post: OpenPost }) {
   const { ids: publicSpaceIds } = usePublicSpaceIds();
   const targets = useComposerTargets(publicSpaceIds);
   const repostTargets = repostTargetsFor(targets, post.sourceOrigin, post.isPublic);
-  const [reposting, setReposting] = useState<RepostOf>();
-  const [error, setError] = useState<string>();
   const close = () => setOpenPost(null);
   const mine = post.author.userId === myUserId;
-
-  const handleDelete = async () => {
-    setError(undefined);
-    try {
-      await deletePost(mx, post.roomId, post.postId);
-      close();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Couldn’t delete that post');
-    }
-  };
 
   return (
     <main className="nu-main-pane" data-nu-role="main-pane">
@@ -56,11 +42,6 @@ export function PostPage({ post }: { post: OpenPost }) {
       </div>
 
       <div className="nu-feed" data-nu-role="post-page">
-        {error && (
-          <p className="nu-field__error" data-nu-role="feed-error">
-            {error}
-          </p>
-        )}
         <InteractivePost
           mode="page"
           role="post-page-post"
@@ -82,40 +63,30 @@ export function PostPage({ post }: { post: OpenPost }) {
             close();
             setProfileUserId(userId);
           }}
-          onRepost={
-            repostTargets.length > 0
-              ? () =>
-                  setReposting(
-                    repostOfPost(
-                      {
-                        roomId: post.roomId,
-                        eventId: post.postId,
-                        sender: post.author.userId,
-                        senderName: post.author.name,
-                        origin: post.sourceOrigin,
-                        ts: post.ts,
-                      },
-                      post.content
-                    )
-                  )
-              : undefined
-          }
-          extraActions={
-            mine && (
-              <button
-                type="button"
-                className="nu-post__action nu-post__action--danger"
-                data-nu-role="feed-post-delete"
-                onClick={() => void handleDelete()}
-              >
-                <Icon name="trash" size={14} />
-                Delete
-              </button>
-            )
-          }
+          {...(repostTargets.length > 0 && {
+            repost: {
+              repostOf: repostOfPost(
+                {
+                  roomId: post.roomId,
+                  eventId: post.postId,
+                  sender: post.author.userId,
+                  senderName: post.author.name,
+                  origin: post.sourceOrigin,
+                  ts: post.ts,
+                },
+                post.content
+              ),
+              targets: repostTargets,
+            },
+          })}
+          {...(mine && {
+            onDelete: async () => {
+              await deletePost(mx, post.roomId, post.postId);
+              close();
+            },
+          })}
         />
       </div>
-      {reposting && <RepostDialog repostOf={reposting} targets={repostTargets} onClose={() => setReposting(undefined)} />}
     </main>
   );
 }

@@ -1,4 +1,6 @@
 import { useEffect, useState } from 'react';
+import { useAtomValue } from 'jotai';
+import { profileRevisionAtom } from '../../app/state/feed';
 import { useMatrixClient } from '../MatrixClientContext';
 import { getExtendedProfile, type ExtendedProfile } from '../extendedProfile';
 
@@ -13,6 +15,9 @@ export function useExtendedProfile(userId: string | undefined): { profile: Exten
   const mx = useMatrixClient();
   const [profile, setProfile] = useState<ExtendedProfile>({});
   const [loading, setLoading] = useState(!!userId);
+  // Bumped after your own profile changes from elsewhere in the app (pinning a post), so a
+  // profile already on screen shows it.
+  const revision = useAtomValue(profileRevisionAtom);
 
   useEffect(() => {
     if (!userId) {
@@ -31,7 +36,7 @@ export function useExtendedProfile(userId: string | undefined): { profile: Exten
     return () => {
       cancelled = true;
     };
-  }, [mx, userId]);
+  }, [mx, userId, revision]);
 
   return { profile, loading };
 }

@@ -5,7 +5,9 @@ import {
   COMMENT_EVENT_TYPE,
   LIKE_KEY,
   mergeNewestPage,
+  REPOST_RECEIPT_TYPE,
   summarizeRelations,
+  summarizeReposts,
   type RawRelationEvent,
 } from './postInteractions';
 
@@ -53,7 +55,7 @@ describe('summarizeRelations', () => {
   it('drops redacted likes and comments', () => {
     const redacted = { content: {}, unsigned: { redacted_because: { type: 'm.room.redaction' } } };
     const summary = summarizeRelations([like('@me:x', redacted), comment('@a:x', 'gone', 5, redacted)], POST, '@me:x');
-    expect(summary).toEqual({ likeCount: 0, myLikeId: undefined, comments: [] });
+    expect(summary).toEqual({ likeCount: 0, likers: [], myLikeId: undefined, comments: [] });
   });
 
   it('keeps comments oldest first, with their media', () => {
@@ -159,5 +161,33 @@ describe('replies to comments', () => {
       },
     });
     expect(summarizeRelations([reply], POST, '@me:x').comments[0].replyTo).toEqual({ eventId: '$c1', sender: '@bob:x' });
+  });
+});
+
+describe('summarizeReposts', () => {
+  const receipt = (sender: string, eventId: string, extra: Partial<RawRelationEvent> = {}): RawRelationEvent => ({
+    event_id: `$receipt-${eventId}`,
+    type: REPOST_RECEIPT_TYPE,
+    sender,
+    origin_server_ts: 1,
+    content: {
+      'xyz.nekous.repost_event': { room_id: '!mine', event_id: eventId, quote: false },
+      'm.relates_to': { rel_type: 'm.reference', event_id: POST },
+    },
+    ...extra,
+  });
+
+  it('counts each reposter once and finds your own repost to undo', () => {
+    const summary = summarizeReposts([receipt('@a:x', '$r1'), receipt('@a:x', '$r2'), receipt('@me:x', '$r3')], POST, '@me:x');
+    expect(summary.repostCount).toBe(2);
+    expect(summary.mine).toEqual({ receiptId: '$receipt-$r3', roomId: '!mine', eventId: '$r3' });
+  });
+
+  it('ignores undone reposts and markers for other posts', () => {
+    const undone = receipt('@me:x', '$r1', { content: {}, unsigned: { redacted_because: {} } });
+    const elsewhere = receipt('@b:x', '$r2', {
+      content: { 'm.relates_to': { rel_type: 'm.reference', event_id: '$other' } },
+    });
+    expect(summarizeReposts([undone, elsewhere], POST, '@me:x')).toEqual({ repostCount: 0 });
   });
 });

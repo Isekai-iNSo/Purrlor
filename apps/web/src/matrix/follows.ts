@@ -1,10 +1,12 @@
 import type { MatrixClient } from 'matrix-js-sdk';
 import { readFreshAccountData } from './freshAccountData';
+import { publishFollow } from './profileFeed';
 
 /**
  * Who and what you follow, for the global feed's Following timeline. Stored in your own account
- * data: nobody else can see your follow list, and nothing is sent to the people or Spaces you
- * follow — following is a filter on what you read, not a relationship anyone else is told about.
+ * data, which is what the Following timeline reads. Following a **person** is also published on
+ * your profile (profileFeed.ts, publishFollow) — that's what follower counts and lists are made of,
+ * and it tells them. Following a **Space** stays private: nothing is sent anywhere.
  */
 export const FOLLOWS_ACCOUNT_DATA = 'xyz.nekous.follows';
 
@@ -35,5 +37,12 @@ export function toggleFollow(follows: Follows, kind: 'user' | 'space', id: strin
 export async function setFollowing(mx: MatrixClient, kind: 'user' | 'space', id: string): Promise<void> {
   const fresh = await readFreshAccountData<Record<string, unknown>>(mx, FOLLOWS_ACCOUNT_DATA);
   const current: Follows = fresh ? { users: stringList(fresh.users), spaces: stringList(fresh.spaces) } : readFollows(mx);
-  await mx.setAccountData(FOLLOWS_ACCOUNT_DATA as any, toggleFollow(current, kind, id) as any);
+  const next = toggleFollow(current, kind, id);
+  await mx.setAccountData(FOLLOWS_ACCOUNT_DATA as any, next as any);
+  if (kind === 'user') {
+    const myUserId = mx.getUserId() ?? '';
+    // Best-effort: the follow is already in effect for your own timeline; a profile room that
+    // can't be written right now only means the count elsewhere lags until the next toggle.
+    await publishFollow(mx, id, next.users.includes(id), mx.getUser(myUserId)?.displayName || myUserId).catch(() => undefined);
+  }
 }

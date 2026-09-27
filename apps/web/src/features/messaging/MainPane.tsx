@@ -113,23 +113,22 @@ export function MainPane() {
     setOpenPost(null);
   }, [selectedRoomId, selectedSpaceId, spaceView, globalFeedOpen, profileUserId, setOpenPost]);
 
-  if (openPost) {
-    return <PostPage key={openPost.postId} post={openPost} />;
-  }
-
-  // The feed is a merge across many rooms rather than one selected room, so it takes
-  // precedence over whatever channel happens to still be selected behind it.
-  if (profileUserId) {
-    return <ProfileView key={profileUserId} userId={profileUserId} />;
-  }
-
-  if (globalFeedOpen) {
-    return <GlobalFeedView />;
-  }
-
+  // Feeds are a merge across many rooms rather than one selected room, so they take precedence
+  // over whatever channel happens to still be selected behind them. A profile sits over a feed,
+  // and a post's page over either. What's underneath stays mounted, just hidden, so Back lands on
+  // the same tab and scroll position instead of reloading the feed from the top.
   const feedSpace = spaceView === 'feed' && selectedSpaceId ? mx.getRoom(selectedSpaceId) : null;
-  if (feedSpace) {
-    return <FeedView space={feedSpace} />;
+  const feed = globalFeedOpen ? 'global' : feedSpace ? 'space' : null;
+  if (feed || profileUserId || openPost) {
+    const covered = !!profileUserId || !!openPost;
+    return (
+      <>
+        {feed === 'global' && <GlobalFeedView hidden={covered} />}
+        {feed === 'space' && feedSpace && <FeedView key={feedSpace.roomId} space={feedSpace} hidden={covered} />}
+        {profileUserId && <ProfileView key={profileUserId} userId={profileUserId} hidden={!!openPost} />}
+        {openPost && <PostPage key={openPost.postId} post={openPost} />}
+      </>
+    );
   }
 
   // One Members button for both layouts: on mobile it opens the slide-in drawer, on desktop it

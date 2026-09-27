@@ -34,6 +34,18 @@
   margin-top: -44px;
 }
 
+.nu-profile-view__actions {
+  display: flex;
+  gap: var(--nu-space-2);
+}
+
+/* Message reuses the outlined follow-button look, but isn't a destructive toggle like
+   "Following" — no red on hover. */
+.nu-profile-view__actions [data-nu-role='profile-message']:hover {
+  border-color: var(--nu-color-text-muted);
+  color: var(--nu-color-text-primary);
+}
+
 .nu-profile-view__avatar {
   border-radius: var(--nu-radius-full);
   box-shadow: 0 0 0 5px var(--nu-color-bg-primary);
@@ -63,8 +75,71 @@
   line-height: 1.5;
 }
 
-.nu-profile-view__count {
+.nu-profile-view__counts {
   margin: var(--nu-space-3) 0 0;
+  display: flex;
+  gap: var(--nu-space-4);
+}
+
+.nu-profile-view__count-link {
+  appearance: none;
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--nu-color-text-muted);
+  font: inherit;
+  font-size: var(--nu-font-size-sm);
+  cursor: pointer;
+}
+
+.nu-profile-view__count-link strong {
+  color: var(--nu-color-text-primary);
+}
+
+.nu-profile-view__count-link:hover {
+  text-decoration: underline;
+}
+
+/* Posts · Media · Likes — an underlined tab strip, like any profile page. */
+.nu-profile-view__tabs {
+  display: flex;
+  border-bottom: 1px solid var(--nu-color-border);
+}
+
+.nu-profile-view__tab {
+  appearance: none;
+  border: none;
+  border-bottom: 3px solid transparent;
+  background: none;
+  flex: 1;
+  padding: var(--nu-space-2) var(--nu-space-3);
+  color: var(--nu-color-text-muted);
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.nu-profile-view__tab:hover {
+  color: var(--nu-color-text-primary);
+}
+
+.nu-profile-view__tab--active {
+  color: var(--nu-color-text-primary);
+  border-bottom-color: var(--nu-color-accent);
+}
+
+.nu-profile-view__pinned {
+  display: flex;
+  flex-direction: column;
+  gap: var(--nu-space-1);
+}
+
+.nu-profile-view__pinned-label,
+.nu-profile-view__private-note {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--nu-space-1);
+  margin-block: 0;
   color: var(--nu-color-text-muted);
   font-size: var(--nu-font-size-xs);
   font-weight: 700;

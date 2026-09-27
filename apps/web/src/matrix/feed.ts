@@ -94,6 +94,10 @@ export type RepostOf = {
   ts: number;
   body: string;
   attachments?: PostAttachment[];
+  /** The original's content warning and sensitive-media flag travel with the copy, so a repost
+   *  never shows uncovered what its author covered. */
+  warning?: string;
+  sensitive?: boolean;
 };
 
 export type PostContent = {
@@ -105,11 +109,26 @@ export type PostContent = {
   /** People mentioned, sent as `m.mentions.user_ids`: what notifies them (the spec's
    *  `.m.rule.is_user_mention` matches any event type). Write-only; nothing reads it back. */
   mentions?: string[];
+  /** A content warning: the text and media stay hidden behind it until the reader asks. */
+  warning?: string;
+  /** The media is sensitive: shown blurred until the reader asks, even without a warning. */
+  sensitive?: boolean;
 };
 
 /** Custom content keys. Namespaced, since `xyz.nekous.post` content is otherwise message-shaped. */
 const ATTACHMENTS_KEY = 'xyz.nekous.attachments';
 const REPOST_KEY = 'xyz.nekous.repost_of';
+const WARNING_KEY = 'xyz.nekous.content_warning';
+const SENSITIVE_KEY = 'xyz.nekous.sensitive';
+
+/** The longest a post or comment may be, in characters — a microblog's usual cap (Mastodon's).
+ *  Checked by the composers; nothing server-side enforces it. */
+export const POST_MAX_LENGTH = 500;
+
+/** Characters as a person counts them: an emoji is one, not the two UTF-16 units `length` says. */
+export function postLength(text: string): number {
+  return [...text].length;
+}
 
 export type PrivatePost = {
   id: string;
@@ -216,6 +235,8 @@ function readRepostOf(raw: unknown): RepostOf | undefined {
     ts: typeof r.ts === 'number' ? r.ts : 0,
     body,
     ...(attachments.length && { attachments }),
+    ...(typeof r.warning === 'string' && r.warning.trim() && { warning: r.warning.trim() }),
+    ...(r.sensitive === true && { sensitive: true }),
   };
 }
 
@@ -235,37 +256,46 @@ export function readPostContent(content: Record<string, unknown>): PostContent |
   const attachments = readAttachments(content[ATTACHMENTS_KEY]);
   const repostOf = readRepostOf(content[REPOST_KEY]);
   if (!body && attachments.length === 0 && !repostOf) return undefined;
+  const warning = typeof content[WARNING_KEY] === 'string' ? (content[WARNING_KEY] as string).trim() : '';
   return {
     body,
     ...(typeof content.format === 'string' && content.format && { format: content.format }),
     ...(typeof content.formatted_body === 'string' && content.formatted_body && { formatted_body: content.formatted_body }),
     ...(attachments.length && { attachments }),
     ...(repostOf && { repostOf }),
+    ...(warning && { warning }),
+    ...(content[SENSITIVE_KEY] === true && { sensitive: true }),
   };
 }
 
 export function buildPostContent(
   body: string,
   formattedBody?: string,
-  extras: { attachments?: PostAttachment[]; repostOf?: RepostOf; mentions?: string[] } = {}
+  extras: { attachments?: PostAttachment[]; repostOf?: RepostOf; mentions?: string[]; warning?: string; sensitive?: boolean } = {}
 ): PostContent {
+  const warning = extras.warning?.trim();
   return {
     body,
     ...(formattedBody && { format: 'org.matrix.custom.html', formatted_body: formattedBody }),
     ...(extras.attachments?.length && { attachments: extras.attachments }),
     ...(extras.repostOf && { repostOf: extras.repostOf }),
     ...(extras.mentions?.length && { mentions: extras.mentions }),
+    ...(warning && { warning }),
+    // Only meaningful with media to cover.
+    ...(extras.sensitive && extras.attachments?.length && { sensitive: true }),
   };
 }
 
 /** PostContent → the event content actually sent (the custom fields under namespaced keys). */
 export function toEventContent(content: PostContent): Record<string, unknown> {
-  const { attachments, repostOf, mentions, ...message } = content;
+  const { attachments, repostOf, mentions, warning, sensitive, ...message } = content;
   return {
     ...message,
     ...(attachments?.length && { [ATTACHMENTS_KEY]: attachments }),
     ...(repostOf && { [REPOST_KEY]: repostOf }),
     ...(mentions?.length && { 'm.mentions': { user_ids: mentions } }),
+    ...(warning && { [WARNING_KEY]: warning }),
+    ...(sensitive && { [SENSITIVE_KEY]: true }),
   };
 }
 
@@ -288,6 +318,8 @@ export function repostOfPost(
     ts: post.ts,
     body: content.body,
     ...(content.attachments?.length && { attachments: content.attachments }),
+    ...(content.warning && { warning: content.warning }),
+    ...(content.sensitive && { sensitive: true }),
   };
 }
 

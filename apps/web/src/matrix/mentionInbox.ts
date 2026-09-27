@@ -8,7 +8,7 @@ import type { MatrixClient } from 'matrix-js-sdk';
  * savedMessages.ts, but populated automatically (see MentionInboxCollector.tsx) rather than by a
  * manual per-message action.
  */
-const MENTION_INBOX_EVENT = 'xyz.nekous.mention_inbox';
+export const MENTION_INBOX_EVENT = 'xyz.nekous.mention_inbox';
 
 /** Oldest entries drop off past this — an unbounded account-data event isn't a reasonable "log,"
  *  and nothing here needs to be a complete historical archive (same tradeoff as the audit log). */

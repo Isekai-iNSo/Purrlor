@@ -516,10 +516,6 @@ export function MessageTimeline({ roomId, onReply }: { roomId: string; onReply: 
   const [loadingMore, setLoadingMore] = useState(false);
   const [atStart, setAtStart] = useState(false);
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
-  // Bumped once each scrollback settles, so the pagination scroll adjustment below always gets a
-  // chance to run and release prevScrollHeightRef — even when the page brought back no new
-  // *messages* (only state/membership events, or nothing at the start of the room).
-  const [paginationSettledCount, setPaginationSettledCount] = useState(0);
   // Where your read receipt sat when you opened the room — captured once per room visit, before
   // this view marks everything read, so the "New" divider stays put while you read past it
   // instead of vanishing the instant the room opens.
@@ -535,8 +531,13 @@ export function MessageTimeline({ roomId, onReply }: { roomId: string; onReply: 
   // wrong spot on every revisit rather than varying. Opening a room always forces the bottom
   // instead, the same way Discord does regardless of where you left off.
   const pinnedToBottomRef = useRef(true);
-  const prevScrollHeightRef = useRef<number | null>(null);
-  const prevMessageCountRef = useRef(0);
+  // The first message visible at the top of the viewport, and how far below the container's top
+  // edge it sat — refreshed on every scroll. When not pinned to the bottom, any change in content
+  // height (older messages prepended, an image above you finishing its fetch+decrypt) restores
+  // that message to the same spot, so nothing you're looking at moves. This is our own stand-in
+  // for the browser's scroll anchoring, which the CSS turns off (overflow-anchor: none) so it
+  // can't fight the stay-at-the-bottom logic.
+  const anchorRef = useRef<{ eventId: string; offset: number } | null>(null);
   const autoBackfillDoneRef = useRef(false);
   const roomEnteredAtRef = useRef(0);
   const forceBottomUntilRef = useRef(0);
@@ -564,8 +565,7 @@ export function MessageTimeline({ roomId, onReply }: { roomId: string; onReply: 
     // with the usual "always open a room at the bottom" behavior.
     const jumpingHere = pendingJump?.roomId === roomId;
     pinnedToBottomRef.current = !jumpingHere;
-    prevScrollHeightRef.current = null;
-    prevMessageCountRef.current = 0;
+    anchorRef.current = null;
     autoBackfillDoneRef.current = false;
     roomEnteredAtRef.current = now;
     forceBottomUntilRef.current = jumpingHere ? 0 : now + SETTLE_EXTENSION_MS;
@@ -596,7 +596,6 @@ export function MessageTimeline({ roomId, onReply }: { roomId: string; onReply: 
     const container = containerRef.current;
     if (!currentRoom || !container || loadingMore || atStart) return;
     setLoadingMore(true);
-    prevScrollHeightRef.current = container.scrollHeight;
     try {
       await mx.scrollback(currentRoom, HISTORY_PAGE_SIZE);
       if (currentRoom.getLiveTimeline().getPaginationToken(Direction.Backward) === null) {
@@ -604,13 +603,53 @@ export function MessageTimeline({ roomId, onReply }: { roomId: string; onReply: 
       }
     } finally {
       setLoadingMore(false);
-      setPaginationSettledCount((n) => n + 1);
     }
+  };
+
+  const captureAnchor = () => {
+    const container = containerRef.current;
+    const content = contentRef.current;
+    if (!container || !content) return;
+    const top = container.getBoundingClientRect().top;
+    for (const el of Array.from(content.querySelectorAll<HTMLElement>('[data-nu-event-id]'))) {
+      const rect = el.getBoundingClientRect();
+      if (rect.bottom > top) {
+        anchorRef.current = { eventId: el.dataset.nuEventId ?? '', offset: rect.top - top };
+        return;
+      }
+    }
+    anchorRef.current = null;
+  };
+
+  // Called after anything that may have changed the content's height: while the room is still
+  // settling in, or the user is pinned to the bottom, follow the bottom; otherwise put the
+  // anchored message back where it was.
+  const keepScrollPosition = () => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    const now = Date.now();
+    const stillSettling = now < forceBottomUntilRef.current && now - roomEnteredAtRef.current < MAX_SETTLE_MS;
+    if (stillSettling) {
+      forceBottomUntilRef.current = Math.min(now + SETTLE_EXTENSION_MS, roomEnteredAtRef.current + MAX_SETTLE_MS);
+    }
+
+    if (stillSettling || pinnedToBottomRef.current) {
+      container.scrollTop = container.scrollHeight;
+    } else if (anchorRef.current) {
+      const el = container.querySelector<HTMLElement>(`[data-nu-event-id="${CSS.escape(anchorRef.current.eventId)}"]`);
+      if (el) {
+        const offset = el.getBoundingClientRect().top - container.getBoundingClientRect().top;
+        container.scrollTop += offset - anchorRef.current.offset;
+      }
+    }
+    captureAnchor();
   };
 
   const handleScroll = () => {
     const container = containerRef.current;
     if (!container) return;
+    captureAnchor();
 
     if (container.scrollTop < LOAD_MORE_THRESHOLD_PX) {
       void loadMore();
@@ -656,6 +695,9 @@ export function MessageTimeline({ roomId, onReply }: { roomId: string; onReply: 
       // fetch, say) would snap the view straight back to the bottom, undoing the jump.
       pinnedToBottomRef.current = false;
       el.scrollIntoView({ block: 'center' });
+      // Re-anchor now rather than waiting on the scroll event: a resize landing first would
+      // otherwise restore the pre-jump anchor and undo the jump.
+      captureAnchor();
       setHighlightedEventId(pendingJump.eventId);
       setPendingJump(null);
     } else if (!atStart && !loadingMore) {
@@ -683,54 +725,31 @@ export function MessageTimeline({ roomId, onReply }: { roomId: string; onReply: 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messages.length, atStart, loadingMore]);
 
-  // Pagination (prepending older messages) is the one case a size-driven observer can't get
-  // right on its own — it needs to know a prepend is *about to* happen (captured in loadMore,
-  // before scrollback resolves) so it can compensate scrollTop by the exact height delta,
-  // rather than reacting after the fact. Runs on every messages.length change and once more after
-  // each scrollback settles.
+  // A new or prepended page of messages: runs before paint, so an older page landing above you
+  // (or a new message below while pinned) never shows a frame in the wrong spot.
   useLayoutEffect(() => {
-    const container = containerRef.current;
-    if (!container) return;
+    keepScrollPosition();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages.length]);
 
-    if (prevScrollHeightRef.current !== null) {
-      container.scrollTop += container.scrollHeight - prevScrollHeightRef.current;
-      prevScrollHeightRef.current = null;
-    }
-
-    prevMessageCountRef.current = messages.length;
-    // Keyed on paginationSettledCount too, not just messages.length: a scrollback that added no
-    // messages used to leave prevScrollHeightRef set forever, and the stay-at-the-bottom observer
-    // below skips every resize while it's set — so each image that finished loading afterwards
-    // pushed the view up off the newest message.
-  }, [messages.length, paginationSettledCount]);
-
-  // The actual "stay at the bottom" mechanism. Fires on every real change to the timeline's
-  // rendered height — new messages, an avatar finishing its fetch, an image finishing its
-  // fetch+decrypt, anything — not just on message-count changes, since those async loads are
-  // exactly what can move the true bottom after the fact. While still within this room-view's
-  // settle window (forceBottomUntilRef), it snaps unconditionally and keeps extending that
-  // window for as long as content keeps changing size; after that, it only follows if the user
-  // is actually pinned there.
+  // Everything else that changes the timeline's rendered height after the fact — an avatar
+  // finishing its fetch, an image or video finishing its fetch+decrypt, a link preview arriving.
+  // While still within this room-view's settle window (forceBottomUntilRef) it snaps to the
+  // bottom unconditionally and keeps extending that window for as long as content keeps
+  // changing size; after that it follows the bottom only if the user is pinned there, and
+  // otherwise holds the anchored message in place. It used to skip every resize while a
+  // scrollback was in flight — and opening an image-heavy room almost always starts one (few
+  // messages → thin-timeline backfill) — so the images loading meanwhile pushed the view up.
   useEffect(() => {
     const content = contentRef.current;
     if (!content) return undefined;
 
-    const observer = new ResizeObserver(() => {
-      if (prevScrollHeightRef.current !== null) return; // let the pagination adjustment above run first
-
-      const now = Date.now();
-      const stillSettling = now < forceBottomUntilRef.current && now - roomEnteredAtRef.current < MAX_SETTLE_MS;
-      if (stillSettling) {
-        forceBottomUntilRef.current = Math.min(now + SETTLE_EXTENSION_MS, roomEnteredAtRef.current + MAX_SETTLE_MS);
-      }
-
-      if (stillSettling || pinnedToBottomRef.current) {
-        bottomRef.current?.scrollIntoView({ block: 'end' });
-      }
-    });
+    // keepScrollPosition only reads refs, so this first render's copy stays correct.
+    const observer = new ResizeObserver(() => keepScrollPosition());
 
     observer.observe(content);
     return () => observer.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [roomId]);
 
   if (!room) return null;

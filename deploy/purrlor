@@ -119,6 +119,46 @@ cmd_doctor() {
     else curl -fsS -m 10 --noproxy '*' --resolve "$1:443:$ip" "https://$1$2"; fi
   }
   has() { local b; b="$(get "$1" "$2")" && grep -q -- "$3" <<<"$b"; }
+
+  # What an HTTP status means for this layout — the part of the chain that's wrong.
+  status_hint() {
+    case "$1" in
+      000) echo "no answer at all (DNS, a firewall, or nothing listening on 443)" ;;
+      301|302|307|308) echo "redirected (to ${2:-?}) — behind Cloudflare, usually SSL/TLS mode 'Flexible': set it to 'Full (strict)'" ;;
+      400) echo "bad request — often a plain-HTTP port reached over HTTPS, or the reverse" ;;
+      403) echo "forbidden — a Cloudflare security rule or an nginx allow/deny" ;;
+      404) echo "not found — nginx has no location for this path (or an old server block for this name is winning)" ;;
+      502|503|504) echo "nginx can't reach the Purrlor service behind it — check its proxy_pass address and that it can reach it" ;;
+      520|521|522|523|524) echo "Cloudflare can't reach your nginx server (521: refused, 522/524: timed out, 523: unreachable)" ;;
+      525|526) echo "Cloudflare and nginx disagree about TLS — the certificate on nginx, or Cloudflare's SSL/TLS mode" ;;
+      *) echo "HTTP $1" ;;
+    esac
+  }
+
+  # probe LABEL HOST PATH [TEXT] — fetches it, and on failure says which status came back and what
+  # that points at, instead of a bare FAIL.
+  probe() {
+    local label="$1" host="$2" path="$3" want="${4:-}" body code loc
+    body="$(mktemp)"
+    local args=(-sS -m 10 --noproxy '*' -o "$body" -w '%{http_code} %{redirect_url}')
+    [ "$edge" = true ] || args+=(--resolve "$host:443:$ip")
+    # A variable, not `read`: curl's -w output has no newline, and read's non-zero exit at the end
+    # of input would end the script under set -e.
+    local out; out="$(curl "${args[@]}" "https://$host$path" 2>/dev/null || true)"
+    code="${out%% *}"; loc="${out#* }"
+    [ -n "$code" ] || code=000
+    if [ "${code:0:1}" = 2 ] && { [ -z "$want" ] || grep -q -- "$want" "$body"; }; then
+      echo "  ok   $label"
+    else
+      fails=$((fails + 1))
+      if [ "${code:0:1}" = 2 ]; then
+        echo "  FAIL $label — answered, but not by Purrlor (the page doesn't look right: an old server block?)"
+      else
+        echo "  FAIL $label — $(status_hint "$code" "$loc")"
+      fi
+    fi
+    rm -f "$body"
+  }
   dns() {
     local r; r="$(getent ahostsv4 "$1" 2>/dev/null | awk '{print $1}' | head -n1)"
     [ -n "$r" ] || return 1
@@ -133,12 +173,17 @@ cmd_doctor() {
   [ -n "$homeserver" ] && check "$(host_of "$homeserver")" dns "$(host_of "$homeserver")"
 
   say "HTTPS"
-  check "app at https://$app" get "$app" /
-  check "token server (https://$app/api/livekit)" has "$app" /api/livekit/config botUserId
-  check "push gateway (https://$app/api/push)" has "$app" /api/push/health ok
-  [ -n "$livekit" ] && check "voice server at https://$livekit" get "$livekit" /
+  probe "app at https://$app" "$app" /config.json livekitUrl
+  probe "token server (https://$app/api/livekit)" "$app" /api/livekit/config botUserId
+  probe "push gateway (https://$app/api/push)" "$app" /api/push/health ok
+  [ -n "$livekit" ] && probe "voice server at https://$livekit" "$livekit" / OK
   if [ -n "$homeserver" ]; then
-    check "homeserver at $homeserver" has "$(host_of "$homeserver")" /_matrix/client/versions versions
+    probe "homeserver at $homeserver" "$(host_of "$homeserver")" /_matrix/client/versions versions
+    if has_matrix; then
+      # Where other servers look: the server name (the bare domain, or matrix.<domain>).
+      local sname; sname="$(env_get MATRIX_SERVER_NAME)"
+      probe "federation over 443 (https://${sname:-$(host_of "$homeserver")}/.well-known/matrix/server)" "${sname:-$(host_of "$homeserver")}" /.well-known/matrix/server m.server
+    fi
   fi
   if has_matrix && [ -n "$homeserver" ] && [ "$edge" != true ]; then
     local mhost; mhost="$(host_of "$homeserver")"

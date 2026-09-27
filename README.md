@@ -319,9 +319,17 @@ The installer adds a `purrlor` command:
 
 ### Other setups
 
-The installer also handles a homeserver you already run (Synapse, Conduit, …) instead of the
-bundled one, a server that can only reach the internet through a proxy, and a TURN relay to hide
-the server's IP from people in calls — it asks. To run it from a checkout you already have:
+The installer also handles, when you say so:
+
+- **nginx on another server you already run** — e.g. an edge box reached over WireGuard, often
+  with Cloudflare in front. It skips nginx and certificates here, has the services listen on this
+  server's private address, and writes the nginx config for that server (plus the relay for
+  voice/video ports) into `deploy/edge/`, with instructions.
+- **An outbound proxy** for servers that reach the internet through one, including a
+  [NekoProxy](https://github.com/m0nnnna/nekoproxy) agent on the same server (`localhost:8080`).
+- **Cloudflare's proxy** in front (orange cloud) — recognised as correct in the DNS check.
+- **A homeserver you already run** (Synapse, Conduit, …) instead of the bundled one, and a TURN
+  relay to hide the server's IP from people in calls. To run it from a checkout you already have:
 `sudo bash deploy/setup.sh`. For doing everything by hand, running nginx on a different machine,
 and what every piece is for, see [`docs/deployment.md`](docs/deployment.md).
 

@@ -11,3 +11,5 @@ deploy/livekit-certs/*.pem
 # Written on the server by deploy/setup.sh and `purrlor backup` — they hold secrets.
 .install-summary
 backups/
+# nginx config setup.sh writes for a separate nginx server, specific to one install.
+deploy/edge/

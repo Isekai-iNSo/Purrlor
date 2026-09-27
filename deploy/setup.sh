@@ -133,11 +133,11 @@ register_account() {
   __esc_local="$(json_escape "$__local")"
   __esc_pw="$(json_escape "$__password")"
   __esc_token="$(json_escape "$__token")"
-  __resp="$(curl -s -X POST "http://127.0.0.1:8008/_matrix/client/v3/register" \
+  __resp="$(curl -s -X POST "http://$LOCAL_ADDR:8008/_matrix/client/v3/register" \
     -d "{\"username\":\"$__esc_local\",\"password\":\"$__esc_pw\"}")"
   __session="$(printf '%s' "$__resp" | grep -o '"session":"[^"]*"' | cut -d'"' -f4)"
   [ -n "$__session" ] || die "Registering @$__local on the new homeserver failed (no session in response: $__resp) — check: docker compose -f deploy/docker-compose.yml --profile matrix logs matrix"
-  __resp="$(curl -s -X POST "http://127.0.0.1:8008/_matrix/client/v3/register" \
+  __resp="$(curl -s -X POST "http://$LOCAL_ADDR:8008/_matrix/client/v3/register" \
     -d "{\"username\":\"$__esc_local\",\"password\":\"$__esc_pw\",\"auth\":{\"type\":\"m.login.registration_token\",\"token\":\"$__esc_token\",\"session\":\"$__session\"}}")"
   REGISTERED_USER_ID="$(printf '%s' "$__resp" | grep -o '"user_id":"[^"]*"' | cut -d'"' -f4)"
   REGISTERED_ACCESS_TOKEN="$(printf '%s' "$__resp" | grep -o '"access_token":"[^"]*"' | cut -d'"' -f4)"
@@ -148,7 +148,7 @@ register_account() {
 # re-run over an existing data volume). The spec's availability check answers M_USER_IN_USE for a
 # taken name; anything else (available, or an invalid name) is left for registration to report.
 username_taken() {
-  curl -s "http://127.0.0.1:8008/_matrix/client/v3/register/available?username=$1" | grep -q M_USER_IN_USE
+  curl -s "http://$LOCAL_ADDR:8008/_matrix/client/v3/register/available?username=$1" | grep -q M_USER_IN_USE
 }
 
 # ---------------------------------------------------------------------------
@@ -299,14 +299,12 @@ port_holder() {
     netstat -ltnp 2>/dev/null | awk -v p=":$1" '$4 ~ p"$" {print $7}' | head -n1 | cut -d/ -f2 | cut -d: -f1 || true
   fi
 }
+# Only a problem if nginx is going to run on this server (asked below); remembered until then.
+PORT_CONFLICT=""
 for port in 80 443; do
   HOLDER="$(port_holder "$port")"
-  if [ -n "$HOLDER" ] && [ "$HOLDER" != nginx ]; then
-    die "Port $port is already in use by '$HOLDER'. Purrlor's nginx needs ports 80 and 443 — stop and
-    disable '$HOLDER', or use a server that isn't already running a website, then re-run."
-  fi
+  if [ -n "$HOLDER" ] && [ "$HOLDER" != nginx ]; then PORT_CONFLICT="$port:$HOLDER"; break; fi
 done
-echo "  ok   ports 80 and 443 are free (or already nginx's)"
 
 # ---------------------------------------------------------------------------
 # Outbound proxy (first, because everything after this may need the internet)
@@ -318,47 +316,103 @@ echo "  ok   ports 80 and 443 are free (or already nginx's)"
 DEFAULT_NO_PROXY="localhost,127.0.0.1,::1,livekit,token-server,push-gateway,web,matrix"
 OUTBOUND_PROXY=""
 OUTBOUND_NO_PROXY=""
+LOCAL_ADDR=127.0.0.1
 
 log "Outbound proxy"
-echo "Some networks only reach the internet through an HTTP(S) proxy (a corporate egress proxy,"
-echo "or one you use to keep this server's own IP out of outgoing requests). If so, this script"
-echo "uses it for its own downloads and configures Docker, certificate renewal, and the services"
-echo "that make outbound requests (federation, push delivery, OpenID checks) to use it too."
-echo "Inbound traffic — people reaching Purrlor, and voice/video media — is unaffected."
+echo "Some networks only reach the internet through an HTTP(S) forward proxy — a corporate egress"
+echo "proxy, or one that keeps this server's own IP out of outgoing requests (a NekoProxy agent,"
+echo "say). If so, this script uses it for its own downloads and configures Docker, certificate"
+echo "renewal, and the services that make outbound requests (federation, push delivery, OpenID"
+echo "checks) to use it too. Inbound traffic — people reaching Purrlor, voice/video — is unaffected."
+CONTAINER_PROXY=""
 if confirm "Does this server need an outbound proxy to reach the internet?" n; then
+  echo "  e.g. http://localhost:8080 for a NekoProxy agent on this server, http://10.0.0.1:8080 for one"
+  echo "  elsewhere; add user:password@ before the host if it uses a login."
   while true; do
-    ask "Proxy URL (http://[user:password@]host:port)" ""
-    if printf '%s' "$REPLY_VALUE" | grep -Eq '^https?://[^[:space:]]+$'; then break; fi
-    echo "  (must start with http:// or https:// — SOCKS isn't supported by the Node services)"
+    ask "Proxy address" ""
+    OUTBOUND_PROXY="$REPLY_VALUE"
+    case "$OUTBOUND_PROXY" in *://*) ;; *) OUTBOUND_PROXY="http://$OUTBOUND_PROXY" ;; esac
+    if printf '%s' "$OUTBOUND_PROXY" | grep -Eq '^https?://[^[:space:]]+$'; then break; fi
+    echo "  (an HTTP(S) proxy address — SOCKS isn't supported by the Node services)"
   done
-  OUTBOUND_PROXY="$REPLY_VALUE"
 
+  # Containers have their own loopback, so a proxy on this host's 127.0.0.1 is unreachable from
+  # them. They reach this host as host.docker.internal (docker-compose.yml maps it), which works as
+  # long as the proxy listens on more than loopback — checked once Docker is installed.
+  CONTAINER_PROXY="$OUTBOUND_PROXY"
   case "$(url_host "$OUTBOUND_PROXY")" in
-    localhost|127.*|::1)
-      warn "That proxy is on this host's loopback address, which containers can't reach — the stack's
-    own outbound requests (and its image builds) would fail. Use an address containers can reach,
-    e.g. this host's LAN IP or the Docker bridge address (usually 172.17.0.1) with the proxy
-    listening there."
-      confirm "Use it anyway?" n || die "Re-run with a proxy address reachable from containers."
+    localhost|127.*|::1|'[::1]')
+      CONTAINER_PROXY="$(printf '%s' "$OUTBOUND_PROXY" | sed -E 's#^(https?://([^@/]*@)?)(localhost|127\.[0-9.]+|\[::1\])#\1host.docker.internal#')"
+      echo "  note: Purrlor's services run in containers, which reach this server as host.docker.internal —"
+      echo "        they'll use $(mask_url "$CONTAINER_PROXY"). The proxy has to listen on more than"
+      echo "        127.0.0.1 for that (NekoProxy: its listen address set to 0.0.0.0 or this server's IP)."
       ;;
   esac
 
   ask "Extra hosts that should bypass the proxy (comma-separated, blank for none)" "-"
-  OUTBOUND_NO_PROXY="$DEFAULT_NO_PROXY"
+  OUTBOUND_NO_PROXY="$DEFAULT_NO_PROXY,host.docker.internal"
   if [ "$REPLY_VALUE" != "-" ]; then OUTBOUND_NO_PROXY="$OUTBOUND_NO_PROXY,$REPLY_VALUE"; fi
 
-  # This script's own curl/apt/certbot/get.docker.com calls. Both spellings, since tools
+  # This script's own curl/apk/apt/certbot/get.docker.com calls. Both spellings, since tools
   # disagree about which one they read.
   export http_proxy="$OUTBOUND_PROXY" https_proxy="$OUTBOUND_PROXY" no_proxy="$OUTBOUND_NO_PROXY"
   export HTTP_PROXY="$OUTBOUND_PROXY" HTTPS_PROXY="$OUTBOUND_PROXY" NO_PROXY="$OUTBOUND_NO_PROXY"
 
   echo "Testing $(mask_url "$OUTBOUND_PROXY") ..."
-  EGRESS_IP="$(curl -fsS -4 -m 15 https://ifconfig.me 2>/dev/null || true)"
-  if [ -n "$EGRESS_IP" ]; then
+  PROXY_ERR="$(mktemp)"
+  if EGRESS_IP="$(curl -fsS -4 -m 15 https://ifconfig.me 2>"$PROXY_ERR")" && [ -n "$EGRESS_IP" ]; then
     echo "  ok   proxy works — outbound requests will appear to come from $EGRESS_IP"
   else
-    warn "Couldn't reach https://ifconfig.me through that proxy."
-    confirm "Continue anyway?" n || die "Check the proxy URL (and credentials), then re-run."
+    warn "Couldn't reach https://ifconfig.me through that proxy: $(tr '\n' ' ' < "$PROXY_ERR")
+    Common causes: the address or port is wrong; the proxy wants a login (user:password@host:port);
+    or it only answers on another interface (NekoProxy binds to the agent's WireGuard IP when it
+    has one — use that address instead of localhost)."
+    if confirm "Carry on without a proxy instead?" y; then
+      OUTBOUND_PROXY="" CONTAINER_PROXY="" OUTBOUND_NO_PROXY=""
+      unset http_proxy https_proxy no_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY
+    else
+      confirm "Keep this proxy anyway?" n || die "Fix the proxy (or its address), then re-run."
+    fi
+  fi
+  rm -f "$PROXY_ERR"
+fi
+
+# ---------------------------------------------------------------------------
+# Where nginx runs
+# ---------------------------------------------------------------------------
+
+log "Web server (nginx)"
+echo "Purrlor needs nginx in front of it for HTTPS. The usual setup runs it on this server and this"
+echo "script handles everything. If you already run nginx on another machine that forwards traffic"
+echo "here over a private network (a WireGuard tunnel, often with Cloudflare in front), pick 2: this"
+echo "script then writes the nginx config for that machine instead of setting up nginx here."
+choose "Where should nginx run?" 1 \
+  "On this server (recommended — sets up nginx and HTTPS certificates for you)" \
+  "On another server I already run"
+if [ "$REPLY_CHOICE" = 2 ]; then
+  EDGE_MODE=true
+  echo
+  echo "Your nginx server reaches this one over a private network. Addresses on this server:"
+  ip -4 -o addr show 2>/dev/null | awk '$2 != "lo" && $2 !~ /^(docker|br-|veth)/ {split($4, a, "/"); printf "    %-12s %s\n", $2, a[1]}'
+  # Default: the first private address, preferring a WireGuard-looking interface.
+  PRIVATE_DEFAULT="$(ip -4 -o addr show 2>/dev/null | awk '$2 != "lo" && $2 !~ /^(docker|br-|veth)/ {split($4, a, "/"); print $2, a[1]}' \
+    | awk '$2 ~ /^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.)/ {print ($1 ~ /^wg/ ? 0 : 1), $2}' \
+    | sort -n | head -n1 | cut -d' ' -f2)"
+  while true; do
+    ask "This server's private address (what your nginx server connects to)" "$PRIVATE_DEFAULT"
+    BIND_ADDR_VALUE="$REPLY_VALUE"
+    if ip -4 -o addr show 2>/dev/null | grep -q " $BIND_ADDR_VALUE/"; then break; fi
+    echo "  ($BIND_ADDR_VALUE isn't one of this server's addresses — pick one from the list above)"
+  done
+  if [ "$BIND_ADDR_VALUE" = 0.0.0.0 ]; then die "Not 0.0.0.0 — these ports have no HTTPS or login of their own; use the private address."; fi
+  LOCAL_ADDR="$BIND_ADDR_VALUE"
+else
+  EDGE_MODE=false
+  BIND_ADDR_VALUE=""
+  if [ -n "$PORT_CONFLICT" ]; then
+    die "Port ${PORT_CONFLICT%%:*} is already in use by '${PORT_CONFLICT#*:}'. nginx on this server needs ports 80
+    and 443 — stop and disable '${PORT_CONFLICT#*:}', or re-run and pick 'On another server' if that's
+    your existing web server."
   fi
 fi
 
@@ -402,7 +456,15 @@ LIVEKIT_URL="wss://$LIVEKIT_DOMAIN"
 # with a proxy configured is exactly what ifconfig.me would otherwise not report. Comes back empty
 # on a network with no direct egress at all — then it's typed in by hand.
 DETECTED_IP="$(curl -fsS -4 -m 10 --noproxy '*' ifconfig.me 2>/dev/null || true)"
-ask "This VPS's public IP" "$DETECTED_IP"
+if [ "$EDGE_MODE" = true ]; then
+  echo
+  echo "Voice and video connect straight to an IP address, not through nginx's HTTP. With nginx on"
+  echo "another server, that's usually that server's public IP — it relays ports 7881/7882 here (the"
+  echo "config written for it includes that) — or this server's own, if those ports reach it directly."
+  ask "Public IP for voice/video" "$DETECTED_IP"
+else
+  ask "This server's public IP" "$DETECTED_IP"
+fi
 HOST_IP_VALUE="$REPLY_VALUE"
 
 while true; do
@@ -464,6 +526,26 @@ if [ "$PROVISION_MATRIX" = true ]; then
   if [ "$MATRIX_DELEGATED" = true ]; then DNS_CHECK_DOMAINS+=("$BASE_DOMAIN"); fi
 fi
 
+# Cloudflare's published IPv4 ranges (https://www.cloudflare.com/ips-v4). A proxied ("orange
+# cloud") record resolves to one of these instead of the server — which is fine: Cloudflare passes
+# the traffic on.
+CLOUDFLARE_V4="173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18
+108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 197.234.240.0/22 198.41.128.0/17 162.158.0.0/15
+104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22"
+ip_to_int() { local IFS=.; set -- $1; echo $(( ($1 << 24) + ($2 << 16) + ($3 << 8) + $4 )); }
+is_cloudflare_ip() {
+  local __ip __range __net __bits __mask
+  printf '%s' "$1" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' || return 1
+  __ip="$(ip_to_int "$1")"
+  for __range in $CLOUDFLARE_V4; do
+    __net="$(ip_to_int "${__range%/*}")"; __bits="${__range#*/}"
+    __mask=$(( (0xFFFFFFFF << (32 - __bits)) & 0xFFFFFFFF ))
+    if [ $(( __ip & __mask )) -eq $(( __net & __mask )) ]; then return 0; fi
+  done
+  return 1
+}
+SAW_CLOUDFLARE=false
+
 # dns_report -> prints one line per domain and returns 0 only if every one is right: an A record
 # for this server, and no AAAA record pointing elsewhere (Let's Encrypt prefers IPv6 when there is
 # one, so a stale AAAA fails the certificate even with a perfect A record).
@@ -473,8 +555,17 @@ dns_report() {
   for __d in "${DNS_CHECK_DOMAINS[@]}"; do
     __v4="$(getent ahostsv4 "$__d" 2>/dev/null | awk '{print $1}' | head -n1 || true)"
     __v6="$(getent ahostsv6 "$__d" 2>/dev/null | awk '{print $1}' | grep ':' | grep -v '^::ffff:' | head -n1 || true)"
-    if [ "$__v4" != "$HOST_IP_VALUE" ]; then
-      printf '  %-6s %-40s %s\n' "WAIT" "$__d" "-> ${__v4:-<no A record yet>} (needs $HOST_IP_VALUE)"
+    if [ -z "$__v4" ]; then
+      printf '  %-6s %-40s %s\n' "WAIT" "$__d" "-> <no A record yet>"
+      __all_ok=1
+    elif is_cloudflare_ip "$__v4"; then
+      printf '  %-6s %-40s %s\n' "ok" "$__d" "-> Cloudflare ($__v4), proxied"
+      SAW_CLOUDFLARE=true
+    elif [ "$EDGE_MODE" = true ]; then
+      # With nginx elsewhere, the records point at that server — whatever its IP is.
+      printf '  %-6s %-40s %s\n' "ok" "$__d" "-> $__v4"
+    elif [ "$__v4" != "$HOST_IP_VALUE" ]; then
+      printf '  %-6s %-40s %s\n' "WAIT" "$__d" "-> $__v4 (needs $HOST_IP_VALUE)"
       __all_ok=1
     elif [ -n "$__v6" ] && ! printf ' %s ' "$__my_v6" | grep -q " $__v6 "; then
       printf '  %-6s %-40s %s\n' "FIX" "$__d" "-> has an AAAA (IPv6) record $__v6 that isn't this server — delete it"
@@ -487,18 +578,30 @@ dns_report() {
 }
 
 log "DNS"
-echo "At your DNS provider, create these records (type A, pointing at this server):"
+if [ "$EDGE_MODE" = true ]; then
+  echo "At your DNS provider, these names should point at your nginx server (or be proxied through"
+  echo "Cloudflare to it), like the sites it already serves:"
+  echo
+  for d in "${DNS_CHECK_DOMAINS[@]}"; do printf '    %s\n' "$d"; done
+else
+  echo "At your DNS provider, create these records (type A, pointing at this server):"
+  echo
+  for d in "${DNS_CHECK_DOMAINS[@]}"; do
+    printf '    %-40s A    %s\n' "$d" "$HOST_IP_VALUE"
+  done
+fi
 echo
-for d in "${DNS_CHECK_DOMAINS[@]}"; do
-  printf '    %-40s A    %s\n' "$d" "$HOST_IP_VALUE"
-done
-echo
-echo "Using Cloudflare? Set them to \"DNS only\" (grey cloud), not proxied — voice and video can't"
-echo "go through Cloudflare's proxy. New records usually work within a few minutes."
+echo "Cloudflare's proxy (orange cloud) is fine: voice and video connect to the IP above directly,"
+echo "not through it. New records usually work within a few minutes."
 while true; do
   echo
   if dns_report; then
     echo "  All set."
+    if [ "$SAW_CLOUDFLARE" = true ] && [ "$EDGE_MODE" = false ]; then
+      echo
+      echo "  Cloudflare: set SSL/TLS to \"Full (strict)\". If the certificate request below fails,"
+      echo "  turn off \"Always Use HTTPS\" until it succeeds (Let's Encrypt checks over plain HTTP)."
+    fi
     break
   fi
   echo
@@ -587,17 +690,25 @@ if ! docker compose version >/dev/null 2>&1; then
   die "Docker is installed but 'docker compose' isn't — install docker-compose-plugin and re-run."
 fi
 
-for cmd in certbot nginx; do
+LOCAL_TOOLS=()
+if [ "$EDGE_MODE" = false ]; then LOCAL_TOOLS=(certbot nginx); fi
+for cmd in "${LOCAL_TOOLS[@]}"; do
   if ! need_cmd "$cmd"; then
     log "Installing $cmd"
-    pkg_install "$cmd"
+    if ! pkg_install "$cmd"; then
+      if [ "$OS_FAMILY" = alpine ]; then
+        die "Couldn't install $cmd with apk (the error is above). Check /etc/apk/repositories has the
+    'community' repository for your Alpine release, and that 'apk update' works${OUTBOUND_PROXY:+ through the proxy}."
+      fi
+      die "Couldn't install $cmd with apt (the error is above). Check that 'apt-get update' works${OUTBOUND_PROXY:+ through the proxy}."
+    fi
   fi
 done
 
 # Certificates renew from a systemd timer on Debian/Ubuntu (certbot's package installs it). Alpine
 # has no timer, so renewal runs from cron's daily jobs instead — without it the certificate
 # quietly expires in 90 days.
-if [ "$INIT" = openrc ]; then
+if [ "$INIT" = openrc ] && [ "$EDGE_MODE" = false ]; then
   cat > /etc/periodic/daily/purrlor-certbot-renew <<RENEW_EOF
 #!/bin/sh
 # Written by Purrlor deploy/setup.sh — renews Let's Encrypt certificates when they're due (it's a
@@ -693,6 +804,22 @@ if [ -n "$OUTBOUND_PROXY" ] && [ "$INIT" = systemd ]; then
   fi
 fi
 
+if [ -n "$CONTAINER_PROXY" ]; then
+  log "Checking the proxy works from inside a container"
+  PROXY_ERR="$(mktemp)"
+  if docker run --rm --add-host host.docker.internal:host-gateway curlimages/curl:latest \
+       -fsS -m 15 -x "$CONTAINER_PROXY" https://ifconfig.me >/dev/null 2>"$PROXY_ERR"; then
+    echo "  ok   containers reach the internet through $(mask_url "$CONTAINER_PROXY")"
+  else
+    warn "Containers couldn't use $(mask_url "$CONTAINER_PROXY"): $(tr '\n' ' ' < "$PROXY_ERR")
+    This server can use the proxy, but containers can't — usually because it only listens on
+    127.0.0.1. Make it listen on this server's IP (NekoProxy: its listen address), or re-run with
+    an address containers can reach. Until then, federation, push and OpenID checks will fail."
+    confirm "Continue anyway?" n || die "Fix the proxy's listen address, then re-run."
+  fi
+  rm -f "$PROXY_ERR"
+fi
+
 # ---------------------------------------------------------------------------
 # .env — keep the existing one, or generate secrets and write a new one
 # ---------------------------------------------------------------------------
@@ -716,6 +843,9 @@ if [ "$KEEP_ENV" = true ]; then
   env_set HOST_IP "$HOST_IP_VALUE"
   env_set OUTBOUND_PROXY "$OUTBOUND_PROXY"
   env_set OUTBOUND_NO_PROXY "$OUTBOUND_NO_PROXY"
+  env_set CONTAINER_PROXY "$CONTAINER_PROXY"
+  env_set BIND_ADDR "$BIND_ADDR_VALUE"
+  env_set PURRLOR_EDGE "$EDGE_MODE"
 
   if [ "$PROVISION_MATRIX" = true ]; then
     EXISTING_SERVER_NAME="$(env_get MATRIX_SERVER_NAME)"
@@ -790,9 +920,16 @@ PURRLOR_LIVEKIT_URL=$LIVEKIT_URL
 PURRLOR_TOKEN_ENDPOINT=$TOKEN_ENDPOINT
 PURRLOR_PUSH_GATEWAY_URL=$PUSH_GATEWAY_URL
 
-# Outbound HTTP(S) proxy for the services that reach the internet (empty: direct).
+# Outbound HTTP(S) proxy for the services that reach the internet (empty: direct). The containers'
+# own copy differs when the proxy is on this host's loopback (host.docker.internal instead).
 OUTBOUND_PROXY=$OUTBOUND_PROXY
 OUTBOUND_NO_PROXY=$OUTBOUND_NO_PROXY
+CONTAINER_PROXY=$CONTAINER_PROXY
+
+# Where the services listen for nginx: empty is 127.0.0.1 (nginx on this server); with nginx on
+# another server, this server's private address (PURRLOR_EDGE=true).
+BIND_ADDR=$BIND_ADDR_VALUE
+PURRLOR_EDGE=$EDGE_MODE
 ENV_EOF
     if [ "$PROVISION_MATRIX" = true ]; then
       cat <<MATRIX_ENV_EOF
@@ -837,7 +974,9 @@ cert_covers_all() {
   openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -checkend 2592000 >/dev/null 2>&1
 }
 
-if cert_covers_all; then
+if [ "$EDGE_MODE" = true ]; then
+  log "Skipping the certificate — your nginx server holds it (the config written below says how)"
+elif cert_covers_all; then
   log "Reusing the existing certificate at $CERT_DIR (it covers every domain and isn't about to expire)"
 else
   log "Requesting a TLS certificate (stopping nginx briefly to free port 80)"
@@ -863,7 +1002,11 @@ HOOK_EOF
   echo "  ok   certificate issued, renewal reload-hook installed"
 fi
 
-if [ "$ENABLE_TURN" = true ]; then
+if [ "$ENABLE_TURN" = true ] && [ "$EDGE_MODE" = true ]; then
+  warn "The TURN relay needs its TLS certificate on this server, which the nginx server holds —
+    copy fullchain.pem and privkey.pem into deploy/livekit-certs/ yourself, then 'purrlor restart livekit'."
+fi
+if [ "$ENABLE_TURN" = true ] && [ "$EDGE_MODE" = false ]; then
   log "Copying the TLS cert into deploy/livekit-certs for LiveKit's TURN relay"
   # LiveKit reads its own files, not /etc/letsencrypt directly (that path is Docker-host-only,
   # not visible inside the container) — copying into a repo-local directory that's already bind-
@@ -947,7 +1090,13 @@ log "Writing nginx config"
 
 # Debian/Ubuntu: sites-available, enabled by a symlink in sites-enabled. Alpine: every file in
 # http.d is loaded as it is.
-if [ -d /etc/nginx/sites-available ] || [ "$OS_FAMILY" = debian ]; then
+# With nginx on another server, the same config is written here for you to copy over, pointing
+# at this server's private address instead of 127.0.0.1.
+UPSTREAM="$LOCAL_ADDR"
+if [ "$EDGE_MODE" = true ]; then
+  mkdir -p "$REPO_ROOT/deploy/edge"
+  NGINX_SITE="$REPO_ROOT/deploy/edge/purrlor.conf"
+elif [ -d /etc/nginx/sites-available ] || [ "$OS_FAMILY" = debian ]; then
   mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled
   NGINX_SITE=/etc/nginx/sites-available/purrlor.conf
 else
@@ -964,7 +1113,7 @@ server {
     ssl_certificate_key $CERT_DIR/privkey.pem;
 
     location / {
-        proxy_pass http://127.0.0.1:8080;
+        proxy_pass http://$UPSTREAM:8080;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
@@ -973,7 +1122,7 @@ server {
 
     # The token server, under the app's own address — what PURRLOR_TOKEN_ENDPOINT points at.
     location /api/livekit/ {
-        proxy_pass http://127.0.0.1:3001/api/livekit/;
+        proxy_pass http://$UPSTREAM:3001/api/livekit/;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
@@ -983,7 +1132,7 @@ server {
     # The push gateway, likewise (PURRLOR_PUSH_GATEWAY_URL). The trailing slashes strip the
     # prefix: /api/push/subscribe reaches the gateway as /subscribe.
     location /api/push/ {
-        proxy_pass http://127.0.0.1:3002/;
+        proxy_pass http://$UPSTREAM:3002/;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
@@ -999,7 +1148,7 @@ server {
     ssl_certificate_key $CERT_DIR/privkey.pem;
 
     location / {
-        proxy_pass http://127.0.0.1:7880;
+        proxy_pass http://$UPSTREAM:7880;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
@@ -1032,7 +1181,7 @@ server {
     client_max_body_size 20M;
 
     location / {
-        proxy_pass http://127.0.0.1:8008;
+        proxy_pass http://$UPSTREAM:8008;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
@@ -1052,7 +1201,7 @@ server {
     client_max_body_size 20M;
 
     location / {
-        proxy_pass http://127.0.0.1:8008;
+        proxy_pass http://$UPSTREAM:8008;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
@@ -1113,6 +1262,28 @@ if [ -e /etc/nginx/sites-enabled/nekous.conf ] || [ -e /etc/nginx/sites-availabl
   echo "  ok   retired the old nekous.conf (kept as sites-available/nekous.conf.bak)"
 fi
 
+if [ "$EDGE_MODE" = true ]; then
+  # LiveKit's media ports aren't HTTP; the edge relays them with nginx's stream module.
+  cat > "$REPO_ROOT/deploy/edge/purrlor-stream.conf" <<STREAM_EOF
+# Purrlor voice/video media, relayed to $UPSTREAM. These are server blocks for nginx's stream {}
+# context (a sibling of http {}, not inside it), which needs the stream module:
+#   Alpine:         apk add nginx-mod-stream, then copy this file to /etc/nginx/stream.d/purrlor.conf
+#                   (installing the module sets up a stream {} that loads everything in stream.d/)
+#   Debian/Ubuntu:  apt install libnginx-mod-stream, copy this file to /etc/nginx/purrlor-stream.conf,
+#                   and add at the top level of /etc/nginx/nginx.conf (outside http {}):
+#                     stream { include /etc/nginx/purrlor-stream.conf; }
+#                   or, if nginx.conf already has a stream {} block, put just the include inside it.
+server {
+    listen 7881;
+    proxy_pass $UPSTREAM:7881;
+}
+server {
+    listen 7882 udp;
+    proxy_pass $UPSTREAM:7882;
+}
+STREAM_EOF
+  echo "  ok   wrote deploy/edge/purrlor.conf and deploy/edge/purrlor-stream.conf for your nginx server"
+else
 # nginx 1.25.1 moved HTTP/2 from a listen flag to its own directive and warns about the old form
 # (Alpine ships the new one); older versions (Debian 12's 1.22) don't know the new directive at all.
 # The config above is written in the old form, and rewritten here when this nginx is new enough.
@@ -1136,6 +1307,7 @@ fi
 nginx -t || die "nginx config test failed — check $NGINX_SITE"
 svc_enable nginx
 svc restart nginx
+fi
 echo "  ok   nginx configured and running"
 
 # ---------------------------------------------------------------------------
@@ -1144,8 +1316,13 @@ echo "  ok   nginx configured and running"
 
 # What has to be reachable from the internet. 7881/7882 carry the voice and video themselves and
 # can't go through nginx; without them calls connect and then hear nothing.
-FIREWALL_PORTS=("80/tcp" "443/tcp" "7881/tcp" "7882/udp")
-if [ "$PROVISION_MATRIX" = true ]; then FIREWALL_PORTS+=("8448/tcp"); fi
+if [ "$EDGE_MODE" = true ]; then
+  # Only the media ports, and only if they reach this server directly rather than via the relay.
+  FIREWALL_PORTS=("7881/tcp" "7882/udp")
+else
+  FIREWALL_PORTS=("80/tcp" "443/tcp" "7881/tcp" "7882/udp")
+fi
+if [ "$PROVISION_MATRIX" = true ] && [ "$EDGE_MODE" = false ]; then FIREWALL_PORTS+=("8448/tcp"); fi
 if [ "$ENABLE_TURN" = true ]; then FIREWALL_PORTS+=("5349/tcp" "3478/udp"); fi
 
 log "Firewall"
@@ -1177,7 +1354,7 @@ if [ "$PROVISION_MATRIX" = true ]; then
   log "Waiting for it to come up"
   MATRIX_UP=false
   for _ in $(seq 1 30); do
-    if curl -fsS -o /dev/null "http://127.0.0.1:8008/_matrix/client/versions" 2>/dev/null; then
+    if curl -fsS -o /dev/null "http://$LOCAL_ADDR:8008/_matrix/client/versions" 2>/dev/null; then
       MATRIX_UP=true
       break
     fi
@@ -1278,11 +1455,24 @@ check() {
   return 0
 }
 # Straight at this server, whatever the DNS cache on this box says, and never via the outbound
-# proxy — this is checking the way in, not the way out.
-public_get() { curl -fsS -m 10 --noproxy '*' --resolve "$1:443:$HOST_IP_VALUE" "https://$1$2"; }
+# proxy — this is checking the way in, not the way out. With nginx elsewhere, through real DNS.
+public_get() {
+  if [ "$EDGE_MODE" = true ]; then
+    curl -fsS -m 10 --noproxy '*' "https://$1$2"
+  else
+    curl -fsS -m 10 --noproxy '*' --resolve "$1:443:$HOST_IP_VALUE" "https://$1$2"
+  fi
+}
 # Captured first, not piped: with pipefail, grep -q quitting early can fail the pipeline.
 body_has() { local __body; __body="$(public_get "$1" "$2")" && grep -q -- "$3" <<<"$__body"; }
 
+if [ "$EDGE_MODE" = true ]; then
+  check "web client answers on $LOCAL_ADDR:8080" curl -fsS -m 5 "http://$LOCAL_ADDR:8080/"
+  check "token server answers on $LOCAL_ADDR:3001" curl -fsS -m 5 "http://$LOCAL_ADDR:3001/health"
+  check "push gateway answers on $LOCAL_ADDR:3002" curl -fsS -m 5 "http://$LOCAL_ADDR:3002/health"
+  check "voice server answers on $LOCAL_ADDR:7880" curl -fsS -m 5 "http://$LOCAL_ADDR:7880/"
+  echo "  (the checks below go through your nginx server — they pass once its config is in place)"
+fi
 check "app loads at https://$APP_DOMAIN" public_get "$APP_DOMAIN" /
 check "app knows its voice server and push gateway" body_has "$APP_DOMAIN" /config.json "$LIVEKIT_DOMAIN"
 check "token server answers at /api/livekit" body_has "$APP_DOMAIN" /api/livekit/config botUserId
@@ -1293,7 +1483,9 @@ if [ "$PROVISION_MATRIX" = true ]; then
   if [ "$MATRIX_DELEGATED" = true ]; then
     check "$BASE_DOMAIN points Matrix at $MATRIX_DOMAIN" body_has "$BASE_DOMAIN" /.well-known/matrix/server "$MATRIX_DOMAIN"
   fi
-  check "federation port 8448 answers" curl -fsS -m 10 --noproxy '*' --resolve "$MATRIX_DOMAIN:8448:$HOST_IP_VALUE" "https://$MATRIX_DOMAIN:8448/_matrix/federation/v1/version"
+  if [ "$EDGE_MODE" = false ]; then
+    check "federation port 8448 answers" curl -fsS -m 10 --noproxy '*' --resolve "$MATRIX_DOMAIN:8448:$HOST_IP_VALUE" "https://$MATRIX_DOMAIN:8448/_matrix/federation/v1/version"
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -1321,8 +1513,25 @@ To revoke it and make a new one:  purrlor new-invite-code"
   fi
 fi
 
+EDGE_NOTE=""
+if [ "$EDGE_MODE" = true ]; then
+  EDGE_NOTE="Your nginx server: two files to add (they're in $REPO_ROOT/deploy/edge/):
+
+  purrlor.conf         the sites — into its http {} config (e.g. /etc/nginx/conf.d/ or http.d/).
+                       It expects a certificate at /etc/letsencrypt/live/$APP_DOMAIN/ covering:
+                         ${DNS_CHECK_DOMAINS[*]}
+                       Get one there with:  certbot certonly --nginx --cert-name $APP_DOMAIN $(printf -- '-d %s ' "${DNS_CHECK_DOMAINS[@]}")
+                       (or change the ssl_certificate lines to where your certificates already are)
+  purrlor-stream.conf  voice/video media relay — Alpine: into /etc/nginx/stream.d/ (after
+                       apk add nginx-mod-stream); Debian/Ubuntu: see the note at the top of the file
+
+Then 'nginx -t && nginx -s reload' there, open 7881/tcp and 7882/udp on it (and 8448/tcp for
+federation), make sure it can reach $LOCAL_ADDR on 8080, 3001, 3002, 7880 and 8008, and run
+'purrlor doctor' here to check it all from the outside."
+fi
+
 FAIL_NOTE=""
-if [ "$CHECK_FAILURES" -gt 0 ]; then
+if [ "$CHECK_FAILURES" -gt 0 ] && [ "$EDGE_MODE" = false ]; then
   FAIL_NOTE="
 !! $CHECK_FAILURES check(s) above failed. Usual causes: a DNS record that isn't pointing here yet,
 !! or your provider's firewall blocking a port. See what's wrong with:  purrlor doctor
@@ -1336,6 +1545,8 @@ $LOGIN_LINE
 
 Voice/video and notifications are already set up for every space created here — nothing to
 configure in the app.
+
+$EDGE_NOTE
 
 $SIGNUP_NOTE
 

@@ -29,6 +29,11 @@
 # this host itself. Never set it to 0.0.0.0 unless this host has no other reason to trust its
 # network — these ports have no TLS or auth of their own; nginx is what's meant to provide both.
 #
+# CONTAINER_PROXY (optional): the containers' own address for that proxy, when it differs from the
+# host's — deploy/setup.sh writes http://host.docker.internal:PORT for a proxy on the host's
+# loopback (a NekoProxy agent on localhost, say), since a container's localhost is its own. Unset,
+# the containers use OUTBOUND_PROXY as it is.
+#
 # OUTBOUND_PROXY / OUTBOUND_NO_PROXY (optional): for a host that has to reach the internet through
 # an HTTP(S) proxy — see .env.example and docs/deployment.md's "Outbound proxy". Only the services
 # that actually make outbound requests get it: token-server (OpenID checks against users'
@@ -73,12 +78,16 @@ services:
 
   token-server:
     image: ${PURRLOR_IMAGE_PREFIX-ghcr.io/m0nnnna/}purrlor-token-server:${PURRLOR_IMAGE_TAG:-latest}
+    extra_hosts:
+      - host.docker.internal:host-gateway
     build:
       context: ..
       dockerfile: services/token-server/Dockerfile
+      extra_hosts:
+        - host.docker.internal:host-gateway
       args:
-        HTTP_PROXY: ${OUTBOUND_PROXY:-}
-        HTTPS_PROXY: ${OUTBOUND_PROXY:-}
+        HTTP_PROXY: ${CONTAINER_PROXY:-${OUTBOUND_PROXY:-}}
+        HTTPS_PROXY: ${CONTAINER_PROXY:-${OUTBOUND_PROXY:-}}
         NO_PROXY: ${OUTBOUND_NO_PROXY:-}
     restart: unless-stopped
     ports:
@@ -99,8 +108,8 @@ services:
       - MATRIX_BOT_PASSWORD=${MATRIX_BOT_PASSWORD}
       - VOICE_MODERATOR_POWER_LEVEL=${VOICE_MODERATOR_POWER_LEVEL:-50}
       - VOICE_ALLOWED_SPACES=${VOICE_ALLOWED_SPACES:-}
-      - HTTP_PROXY=${OUTBOUND_PROXY:-}
-      - HTTPS_PROXY=${OUTBOUND_PROXY:-}
+      - HTTP_PROXY=${CONTAINER_PROXY:-${OUTBOUND_PROXY:-}}
+      - HTTPS_PROXY=${CONTAINER_PROXY:-${OUTBOUND_PROXY:-}}
       - NO_PROXY=${OUTBOUND_NO_PROXY:-}
       - NODE_USE_ENV_PROXY=1
     depends_on:
@@ -110,12 +119,16 @@ services:
 
   push-gateway:
     image: ${PURRLOR_IMAGE_PREFIX-ghcr.io/m0nnnna/}purrlor-push-gateway:${PURRLOR_IMAGE_TAG:-latest}
+    extra_hosts:
+      - host.docker.internal:host-gateway
     build:
       context: ..
       dockerfile: services/push-gateway/Dockerfile
+      extra_hosts:
+        - host.docker.internal:host-gateway
       args:
-        HTTP_PROXY: ${OUTBOUND_PROXY:-}
-        HTTPS_PROXY: ${OUTBOUND_PROXY:-}
+        HTTP_PROXY: ${CONTAINER_PROXY:-${OUTBOUND_PROXY:-}}
+        HTTPS_PROXY: ${CONTAINER_PROXY:-${OUTBOUND_PROXY:-}}
         NO_PROXY: ${OUTBOUND_NO_PROXY:-}
     restart: unless-stopped
     ports:
@@ -126,8 +139,8 @@ services:
       - VAPID_SUBJECT=${VAPID_SUBJECT}
       - PORT=3002
       - ALLOWED_ORIGINS=${ALLOWED_ORIGINS}
-      - HTTP_PROXY=${OUTBOUND_PROXY:-}
-      - HTTPS_PROXY=${OUTBOUND_PROXY:-}
+      - HTTP_PROXY=${CONTAINER_PROXY:-${OUTBOUND_PROXY:-}}
+      - HTTPS_PROXY=${CONTAINER_PROXY:-${OUTBOUND_PROXY:-}}
       - NO_PROXY=${OUTBOUND_NO_PROXY:-}
       - NODE_USE_ENV_PROXY=1
     networks:
@@ -138,9 +151,11 @@ services:
     build:
       context: ..
       dockerfile: apps/web/Dockerfile
+      extra_hosts:
+        - host.docker.internal:host-gateway
       args:
-        HTTP_PROXY: ${OUTBOUND_PROXY:-}
-        HTTPS_PROXY: ${OUTBOUND_PROXY:-}
+        HTTP_PROXY: ${CONTAINER_PROXY:-${OUTBOUND_PROXY:-}}
+        HTTPS_PROXY: ${CONTAINER_PROXY:-${OUTBOUND_PROXY:-}}
         NO_PROXY: ${OUTBOUND_NO_PROXY:-}
     restart: unless-stopped
     ports:
@@ -175,6 +190,8 @@ services:
   matrix:
     image: forgejo.ellis.link/continuwuation/continuwuity:latest
     profiles: ['matrix']
+    extra_hosts:
+      - host.docker.internal:host-gateway
     restart: unless-stopped
     ports:
       - '${BIND_ADDR:-127.0.0.1}:8008:8008' # reverse-proxied over TLS (both 443 and 8448), not public
@@ -191,8 +208,8 @@ services:
       CONTINUWUITY_ALLOW_FEDERATION: 'true'
       # Continuwuity's HTTP client honors the standard variables (verified against a logging proxy:
       # federation lookups arrive as CONNECTs).
-      HTTP_PROXY: ${OUTBOUND_PROXY:-}
-      HTTPS_PROXY: ${OUTBOUND_PROXY:-}
+      HTTP_PROXY: ${CONTAINER_PROXY:-${OUTBOUND_PROXY:-}}
+      HTTPS_PROXY: ${CONTAINER_PROXY:-${OUTBOUND_PROXY:-}}
       NO_PROXY: ${OUTBOUND_NO_PROXY:-}
     volumes:
       - matrix-db:/var/lib/continuwuity

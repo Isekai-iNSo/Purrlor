@@ -43,6 +43,23 @@ need_root() {
 
 host_of() { printf '%s' "$1" | sed -E 's#^[a-z]+://##; s#[:/].*$##'; }
 
+# Same list and test as setup.sh: a proxied Cloudflare record resolves to Cloudflare, not here.
+CLOUDFLARE_V4="173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18
+108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 197.234.240.0/22 198.41.128.0/17 162.158.0.0/15
+104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22"
+ip_to_int() { local IFS=.; set -- $1; echo $(( ($1 << 24) + ($2 << 16) + ($3 << 8) + $4 )); }
+cloudflare_ip() {
+  local ip range net bits mask
+  printf '%s' "$1" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' || return 1
+  ip="$(ip_to_int "$1")"
+  for range in $CLOUDFLARE_V4; do
+    net="$(ip_to_int "${range%/*}")"; bits="${range#*/}"
+    mask=$(( (0xFFFFFFFF << (32 - bits)) & 0xFFFFFFFF ))
+    [ $(( ip & mask )) -eq $(( net & mask )) ] && return 0
+  done
+  return 1
+}
+
 cmd_help() {
   cat <<'HELP'
 purrlor — manage this Purrlor install
@@ -69,13 +86,14 @@ cmd_info() {
 cmd_status() {
   compose ps
   echo
-  local ok=0
-  curl -fsS -m 5 http://127.0.0.1:8080/ >/dev/null 2>&1 && echo "  ok   web" || { echo "  FAIL web"; ok=1; }
-  curl -fsS -m 5 http://127.0.0.1:3001/health >/dev/null 2>&1 && echo "  ok   token-server" || { echo "  FAIL token-server"; ok=1; }
-  curl -fsS -m 5 http://127.0.0.1:3002/health >/dev/null 2>&1 && echo "  ok   push-gateway" || { echo "  FAIL push-gateway"; ok=1; }
-  curl -fsS -m 5 http://127.0.0.1:7880/ >/dev/null 2>&1 && echo "  ok   livekit" || { echo "  FAIL livekit"; ok=1; }
+  local ok=0 a
+  a="$(env_get BIND_ADDR)"; a="${a:-127.0.0.1}"
+  curl -fsS -m 5 http://$a:8080/ >/dev/null 2>&1 && echo "  ok   web" || { echo "  FAIL web"; ok=1; }
+  curl -fsS -m 5 http://$a:3001/health >/dev/null 2>&1 && echo "  ok   token-server" || { echo "  FAIL token-server"; ok=1; }
+  curl -fsS -m 5 http://$a:3002/health >/dev/null 2>&1 && echo "  ok   push-gateway" || { echo "  FAIL push-gateway"; ok=1; }
+  curl -fsS -m 5 http://$a:7880/ >/dev/null 2>&1 && echo "  ok   livekit" || { echo "  FAIL livekit"; ok=1; }
   if has_matrix; then
-    curl -fsS -m 5 http://127.0.0.1:8008/_matrix/client/versions >/dev/null 2>&1 && echo "  ok   matrix" || { echo "  FAIL matrix"; ok=1; }
+    curl -fsS -m 5 http://$a:8008/_matrix/client/versions >/dev/null 2>&1 && echo "  ok   matrix" || { echo "  FAIL matrix"; ok=1; }
   fi
   [ "$ok" -eq 0 ] || echo "
 Something isn't answering — 'purrlor logs <service>' shows why."
@@ -93,11 +111,23 @@ cmd_doctor() {
     local label="$1"; shift
     if "$@" >/dev/null 2>&1; then echo "  ok   $label"; else echo "  FAIL $label"; fails=$((fails + 1)); fi
   }
-  get() { curl -fsS -m 10 --noproxy '*' --resolve "$1:443:$ip" "https://$1$2"; }
+  local edge; edge="$(env_get PURRLOR_EDGE)"
+  # With nginx on another server, through real DNS (it's that server being checked); otherwise
+  # straight at this one.
+  get() {
+    if [ "$edge" = true ]; then curl -fsS -m 10 --noproxy '*' "https://$1$2"
+    else curl -fsS -m 10 --noproxy '*' --resolve "$1:443:$ip" "https://$1$2"; fi
+  }
   has() { local b; b="$(get "$1" "$2")" && grep -q -- "$3" <<<"$b"; }
-  dns() { [ "$(getent ahostsv4 "$1" 2>/dev/null | awk '{print $1}' | head -n1)" = "$ip" ]; }
+  dns() {
+    local r; r="$(getent ahostsv4 "$1" 2>/dev/null | awk '{print $1}' | head -n1)"
+    [ -n "$r" ] || return 1
+    # Resolving at all is enough with nginx elsewhere (or behind Cloudflare's proxy).
+    [ "$edge" = true ] || [ "$r" = "$ip" ] || cloudflare_ip "$r"
+  }
 
-  say "DNS (should all point at $ip)"
+  if [ "$edge" = true ]; then say "DNS (should resolve — to your nginx server or Cloudflare)"
+  else say "DNS (should all point at $ip, or Cloudflare)"; fi
   check "$app" dns "$app"
   [ -n "$livekit" ] && check "$livekit" dns "$livekit"
   [ -n "$homeserver" ] && check "$(host_of "$homeserver")" dns "$(host_of "$homeserver")"
@@ -110,14 +140,15 @@ cmd_doctor() {
   if [ -n "$homeserver" ]; then
     check "homeserver at $homeserver" has "$(host_of "$homeserver")" /_matrix/client/versions versions
   fi
-  if has_matrix && [ -n "$homeserver" ]; then
+  if has_matrix && [ -n "$homeserver" ] && [ "$edge" != true ]; then
     local mhost; mhost="$(host_of "$homeserver")"
     check "federation (port 8448)" curl -fsS -m 10 --noproxy '*' --resolve "$mhost:8448:$ip" "https://$mhost:8448/_matrix/federation/v1/version"
   fi
 
   say "Certificate"
   local days
-  days="$(echo | openssl s_client -connect "$ip:443" -servername "$app" 2>/dev/null | openssl x509 -noout -enddate 2>/dev/null | cut -d= -f2)"
+  local target="$ip"; [ "$edge" = true ] && target="$app"
+  days="$(echo | openssl s_client -connect "$target:443" -servername "$app" 2>/dev/null | openssl x509 -noout -enddate 2>/dev/null | cut -d= -f2)"
   if [ -n "$days" ]; then echo "  ok   valid until $days (renews automatically)"; else echo "  FAIL couldn't read the certificate"; fails=$((fails + 1)); fi
 
   echo

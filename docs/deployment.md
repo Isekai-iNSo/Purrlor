@@ -384,6 +384,15 @@ accounts that already exist, and reuses the certificate when it still covers eve
 
 ## Outbound proxy (optional)
 
+Any HTTP(S) forward proxy works, including a [NekoProxy](https://github.com/m0nnnna/nekoproxy)
+agent's (its "Forward proxy port", with `user:password@` in front of the host if you set "Forward
+proxy auth"). The installer accepts `host:port` without the `http://`. A proxy on this server's
+own loopback (`localhost:8080`) is fine for the server itself, but containers have their own
+loopback — so the installer gives them `http://host.docker.internal:8080` instead (`CONTAINER_PROXY`
+in `.env`; docker-compose.yml maps that name to the host) and checks from inside a container that
+it works. For that, the proxy has to listen on more than 127.0.0.1: NekoProxy binds to the agent's
+WireGuard IP when it has one — give the installer that address — or to its listen address otherwise.
+
 For a host that can only reach the internet through an HTTP(S) proxy — a corporate egress proxy,
 or one you run so this server's own IP stays out of its outgoing requests. Inbound traffic
 (people loading Purrlor, other homeservers federating in, voice/video media) doesn't go through it.
@@ -423,6 +432,14 @@ A few things to know:
   the host can reach.
 
 ## Variant: split edge-proxy + origin topology
+
+**The installer does this for you:** at "Where should nginx run?", pick "On another server I
+already run". It then skips nginx and certificates on this server, asks for this server's private
+address (offering its WireGuard/LAN addresses) and sets `BIND_ADDR` and `PURRLOR_EDGE=true`,
+accepts DNS records that point at the edge (or at Cloudflare), and writes two files for the edge
+box into `deploy/edge/`: `purrlor.conf` (the sites, proxying to the private address) and
+`purrlor-stream.conf` (the voice/video relay), with where each goes. `purrlor doctor` then checks
+through the edge. The rest of this section is what that amounts to, by hand.
 
 Everything above assumes nginx and the docker-compose stack run on the same box. A common
 alternative, especially if the actual app server sits behind Cloudflare and isn't meant to be

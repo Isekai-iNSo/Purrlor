@@ -1,7 +1,12 @@
 # Nginx reverse proxy — all-in-one example (web app + token server + push gateway + LiveKit)
 # fronting the docker-compose.yml stack in this directory. Copy, replace YOUR_DOMAIN and the SSL
-# paths. For separate vhosts per service instead, see livekit.nginx.conf.example,
-# token.nginx.conf.example, and push.nginx.conf.example.
+# paths. It's what deploy/setup.sh writes, minus the bundled-homeserver blocks.
+#
+# The token server and push gateway are served under the app's own address (/api/livekit/ and
+# /api/push/), so the whole thing needs only two names: app. and livekit. — and those two paths
+# are what .env's PURRLOR_TOKEN_ENDPOINT and PURRLOR_PUSH_GATEWAY_URL point at. (Older installs
+# gave each its own subdomain; token.nginx.conf.example and push.nginx.conf.example still show
+# that layout, and it works just as well.)
 #
 # app.YOUR_DOMAIN is Purrlor's own web client — deliberately not "chat." or "matrix.", so it
 # doesn't collide with wherever your *existing* Matrix homeserver already lives (see
@@ -24,6 +29,15 @@ server {
 
     location /api/livekit/ {
         proxy_pass http://127.0.0.1:3001/api/livekit/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # The trailing slashes strip the prefix: /api/push/subscribe reaches the gateway as /subscribe.
+    location /api/push/ {
+        proxy_pass http://127.0.0.1:3002/;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -52,39 +66,7 @@ server {
 }
 
 server {
-    listen 443 ssl http2;
-    server_name token.YOUR_DOMAIN;
-
-    ssl_certificate /path/to/ssl/fullchain.pem;
-    ssl_certificate_key /path/to/ssl/privkey.pem;
-
-    location / {
-        proxy_pass http://127.0.0.1:3001;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-}
-
-server {
-    listen 443 ssl http2;
-    server_name push.YOUR_DOMAIN;
-
-    ssl_certificate /path/to/ssl/fullchain.pem;
-    ssl_certificate_key /path/to/ssl/privkey.pem;
-
-    location / {
-        proxy_pass http://127.0.0.1:3002;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-}
-
-server {
     listen 80;
-    server_name app.YOUR_DOMAIN livekit.YOUR_DOMAIN token.YOUR_DOMAIN push.YOUR_DOMAIN;
+    server_name app.YOUR_DOMAIN livekit.YOUR_DOMAIN;
     return 301 https://$host$request_uri;
 }

@@ -1,11 +1,22 @@
 # Deploying your own Purrlor server
 
-A guided, start-to-finish walkthrough for standing up a Purrlor deployment on a fresh VPS: DNS,
-TLS, the four services in `deploy/docker-compose.yml`, and the handful of settings that live
-inside the app itself rather than in `.env`. There's also `deploy/setup.sh`, a script that
-automates most of the mechanical steps below — see "The guided script" near the end if you'd
-rather not run each command by hand. Reading this guide first is still worth it even if you use
-the script: it explains *why* each step exists, which the script doesn't.
+## The quick way
+
+On a fresh Debian 12 or Ubuntu 22.04/24.04 server, as root:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/m0nnnna/Purrlor/master/install.sh | sudo bash
+```
+
+That clones Purrlor into `/opt/purrlor` and runs the guided installer (`deploy/setup.sh`, described
+under "The guided script" below). It asks a few questions, shows you the DNS records to create and
+waits for them, then installs and starts everything — a homeserver with your admin account, HTTPS,
+voice, push — and checks the result from the outside. Afterwards, `purrlor` manages it (see
+"Maintaining a running deployment"). Most people need nothing else on this page.
+
+The rest of this guide is the same install done by hand, step by step: what each piece is for,
+and how to run it when the installer's assumptions don't fit (your own homeserver, nginx on a
+separate machine).
 
 ## Scope — what this is (and isn't)
 
@@ -55,13 +66,16 @@ What you're deploying on that VPS is four small services, all defined in
 |----------------|-----------------------------------------------------------|---------------------------|
 | `web`          | The Purrlor client itself (the thing people open in a browser) | `app.YOUR_DOMAIN` |
 | `livekit`      | Voice/video call media server                              | `livekit.YOUR_DOMAIN` |
-| `token-server` | Issues LiveKit call tokens, gated by Matrix room membership/power level | `token.YOUR_DOMAIN` |
-| `push-gateway` | Turns Matrix push notifications into real Web Push, for notifications when no tab is open | `push.YOUR_DOMAIN` |
+| `token-server` | Issues LiveKit call tokens, gated by Matrix room membership/power level | `app.YOUR_DOMAIN/api/livekit/` |
+| `push-gateway` | Turns Matrix push notifications into real Web Push, for notifications when no tab is open | `app.YOUR_DOMAIN/api/push/` |
 
-None of these four subdomains should collide with your homeserver's own domain (often
-`matrix.YOUR_DOMAIN` or similar) — they're separate services. If you skip voice/video and
-background push entirely, you only need `app.YOUR_DOMAIN` and can drop `livekit`, `token-server`,
-and `push-gateway` from the compose file and the nginx config below.
+So there are only two names to point at the server: `app.` and `livekit.`. Neither should collide
+with your homeserver's own domain (often `matrix.YOUR_DOMAIN`) — they're separate services. (Older
+versions of this guide gave the token server and push gateway their own `token.` and `push.`
+subdomains; that still works if you'd rather — `deploy/nginx/token.nginx.conf.example` and
+`push.nginx.conf.example` show it.) If you skip voice/video and background push entirely, you only
+need `app.YOUR_DOMAIN` and can drop `livekit`, `token-server`, and `push-gateway` from the compose
+file and the nginx config below.
 
 ## Prerequisites checklist
 
@@ -82,22 +96,27 @@ and `push-gateway` from the compose file and the nginx config below.
 
 ## Step 1 — DNS
 
-Point four A (or AAAA) records at your VPS's public IP:
+Point two A records at your VPS's public IP:
 
 ```
 app.YOUR_DOMAIN      ->  <VPS IP>
 livekit.YOUR_DOMAIN   ->  <VPS IP>
-token.YOUR_DOMAIN     ->  <VPS IP>
-push.YOUR_DOMAIN      ->  <VPS IP>
 ```
 
-**Option B (bundled homeserver) needs two more** — the bare apex domain (for `.well-known`
-federation delegation) and a `matrix.` subdomain (the actual homeserver):
+**Option B (bundled homeserver) needs one or two more**: a `matrix.` subdomain (the homeserver
+itself), and — only if you want addresses like `@name:YOUR_DOMAIN` rather than
+`@name:matrix.YOUR_DOMAIN` — the bare domain too, for `.well-known` delegation. Pointing the bare
+domain here replaces any website on it; the installer asks, and defaults to leaving it alone when
+it already points somewhere else.
 
 ```
-YOUR_DOMAIN           ->  <VPS IP>
 matrix.YOUR_DOMAIN    ->  <VPS IP>
+YOUR_DOMAIN           ->  <VPS IP>     (only for @name:YOUR_DOMAIN addresses)
 ```
+
+If the domain is on Cloudflare, set these records to **DNS only** (grey cloud): voice and video
+can't pass through Cloudflare's proxy. And don't leave an AAAA (IPv6) record pointing somewhere
+else — Let's Encrypt prefers IPv6 and fails the certificate if it lands on the wrong machine.
 
 DNS propagation can take a few minutes to a few hours depending on your registrar/TTLs — the
 certbot step below will fail with a timeout if it runs before records have propagated, so it's
@@ -207,6 +226,12 @@ Fill in every value `.env.example` calls out, using what you generated above:
 - `VAPID_SUBJECT` — `mailto:you@YOUR_DOMAIN` (a real address the push service can contact if
   something's wrong with this deployment)
 - `PURRLOR_HOMESERVER_URL` — optional: your homeserver's URL, to lock the web client to it
+- `PURRLOR_LIVEKIT_URL` — `wss://livekit.YOUR_DOMAIN`
+- `PURRLOR_TOKEN_ENDPOINT` — `https://app.YOUR_DOMAIN/api/livekit/token`
+- `PURRLOR_PUSH_GATEWAY_URL` — `https://app.YOUR_DOMAIN/api/push`
+
+The last three are what let the app set up voice and notifications by itself (Step 10). Leave
+them out and people configure both by hand in the app instead.
 
 Leave `VOICE_MODERATOR_POWER_LEVEL` at its default unless you specifically want a different
 threshold.
@@ -225,11 +250,12 @@ sudo apt update && sudo apt install -y certbot
 sudo systemctl stop nginx 2>/dev/null   # free up port 80 if nginx is already installed/running
 
 sudo certbot certonly --standalone \
-  -d app.YOUR_DOMAIN -d livekit.YOUR_DOMAIN -d token.YOUR_DOMAIN -d push.YOUR_DOMAIN \
+  -d app.YOUR_DOMAIN -d livekit.YOUR_DOMAIN \
   --agree-tos -m you@YOUR_DOMAIN --no-eff-email
 ```
 
-This gets you one certificate covering all four subdomains, at
+This gets you one certificate covering both names (add `-d` for any others you need, e.g. the
+homeserver's), at
 `/etc/letsencrypt/live/app.YOUR_DOMAIN/{fullchain,privkey}.pem`. `--standalone` briefly binds
 port 80 itself to answer the ACME challenge, which is why nginx needs to be stopped (or not yet
 installed) first.
@@ -263,10 +289,9 @@ sudo ln -s /etc/nginx/sites-available/purrlor.conf /etc/nginx/sites-enabled/
 sudo nginx -t && sudo systemctl restart nginx
 ```
 
-(If you'd rather run each service on its own separate vhost file instead of one combined file,
-`deploy/nginx/livekit.nginx.conf.example`, `token.nginx.conf.example`, and
-`push.nginx.conf.example` are the same server blocks split out individually — functionally
-identical, just organized differently.)
+(`deploy/nginx/livekit.nginx.conf.example` is the LiveKit block on its own, if you keep one vhost
+file per service. `token.nginx.conf.example` and `push.nginx.conf.example` are the older layout
+with their own subdomains — use those only if you set the `PURRLOR_*` URLs in `.env` to match.)
 
 ## Step 9 — Bring the stack up
 
@@ -282,61 +307,67 @@ curl -s http://127.0.0.1:3001/health   # token server
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080   # web client, expect 200
 ```
 
-## Step 10 — The parts that live inside the app, not `.env`
+## Step 10 — Voice and notifications in the app
 
-Two settings are deliberately per-Space or per-account, configured in the running app itself
-rather than baked into the image — see `docs/voice-architecture.md`'s "State events" section for
-why:
+With `PURRLOR_LIVEKIT_URL`, `PURRLOR_TOKEN_ENDPOINT` and `PURRLOR_PUSH_GATEWAY_URL` set (Step 6),
+there's nothing to do here:
 
-- **Voice server, per Space** — open Space Settings → General for each Space you want voice/video
-  in, and set the LiveKit URL (`wss://livekit.YOUR_DOMAIN`) and the token endpoint
-  (`https://token.YOUR_DOMAIN`). The **Voice service account** field below them fills itself in
-  from the token server the moment you leave the endpoint field; leave it as it lands. That's
-  what lets voice channels invite the bot themselves — if it stays empty, check that
-  `https://token.YOUR_DOMAIN/api/livekit/config` is reachable from your browser.
-- **Push gateway, per account** — open Account Settings → Notifications and set the push
-  gateway's URL (`https://push.YOUR_DOMAIN`).
+- **Voice** — the first time a Space's admin opens a Space created on this homeserver, the app
+  gives it this deployment's voice server and invites the token server's bot, exactly as saving
+  Space Settings → General by hand would. A Space where an admin has turned voice off (cleared
+  those fields) is left alone, as is a Space from another homeserver, which this token server
+  can't serve.
+- **Notifications** — Account Settings → Notifications already has the push gateway filled in;
+  turning background notifications on is one switch.
 
-At this point: log into `https://app.YOUR_DOMAIN` with your existing homeserver account, set the
-Space's voice URLs above, and you should be able to create a voice channel and join it — the bot
-account from Step 4 gets invited into each voice channel automatically.
+Without them, set both by hand: in **Space Settings → General**, the LiveKit URL
+(`wss://livekit.YOUR_DOMAIN`) and token endpoint (`https://app.YOUR_DOMAIN/api/livekit/token` —
+the full path, not just the host); the **Voice service account** fills itself in from the token
+server once you leave that field. And in **Account Settings → Notifications**, the push gateway
+(`https://app.YOUR_DOMAIN/api/push`).
+
+Then log into `https://app.YOUR_DOMAIN`, create a voice channel, and join it.
 
 ## The guided script
 
-`deploy/setup.sh` automates Steps 2, 5, 6, 7, 8, and 9 above, plus — for **Option B** only — Step
-4 as well (it registers both the bot account and your own account itself, so there's nothing
-homeserver-specific left for you to do by hand). DNS (Step 1) and the in-app config (Step 10)
-still need you either way. Run it from the repo root on the VPS, as root:
+`deploy/setup.sh` does all of the above, Steps 1–10: the one-line installer at the top of this
+page downloads Purrlor and runs it. From a checkout you already have, run it as root from the
+repo root:
 
 ```bash
 sudo bash deploy/setup.sh
 ```
 
-It's interactive. It first asks whether this host needs an outbound proxy (default no — see
-"Outbound proxy" below), then whether to provision a homeserver (Option B, the default) or use
-one you already run (Option A) — everything downstream of that answer adjusts accordingly:
+In order, it:
 
-- **Option A**: asks for your domain, VPS IP, homeserver URL, and bot credentials.
-- **Option B**: asks for your domain, VPS IP, who may sign up (invite-only or closed), a local
-  part for the bot account, and a local part + password for your own account — then, once the
-  new homeserver is up, registers both automatically via its registration API (the bot's
-  password is generated for you and never shown — only its resulting access token ends up in
-  `.env`) and writes their credentials into `.env` itself. Your account is the first one on the
-  server, which makes it the homeserver's admin.
-- **Either way**, it asks whether to lock the web client to that homeserver (default yes), and
-  whether to enable the optional TURN relay hardening (default no) — see "TURN relay" below for
-  what saying yes actually does.
+1. **Checks the server** — adds a swap file if there's too little memory to build the web client
+   (the usual reason a small VPS "fails for no reason" mid-build), and stops early if disk space is
+   short or something other than nginx already holds ports 80/443.
+2. **Asks** whether this host needs an outbound proxy (see "Outbound proxy"), your domain, the
+   app's and voice server's addresses, whether to add the TURN relay, the server's public IP
+   (detected for you), and your email.
+3. **Asks about the homeserver** — provision one (Option B, the default) or use yours (Option A).
+   For Option B: whether addresses should read `@name:YOUR_DOMAIN` (the bare domain points here
+   too) or `@name:matrix.YOUR_DOMAIN` (the bare domain is left alone — the default when it already
+   points somewhere else, like an existing website), and who may sign up (invite-only with a
+   sign-up code, or closed).
+4. **Walks you through DNS** — lists exactly which records to create, then checks them, again
+   whenever you press Enter, until they all point here (catching a stray AAAA record too).
+5. **Installs** Docker, nginx and certbot if they're missing; generates every secret; writes
+   `.env`, including the `PURRLOR_*` URLs that make voice and push work without in-app setup.
+6. **Gets a certificate** covering every name (re-issuing if a re-run needs a name the old one
+   lacks), writes and enables the nginx config, and opens the firewall if `ufw` is active.
+7. **Starts everything.** For Option B it starts the homeserver first and creates your account
+   (the first, so the admin) and the token server's bot account through the registration API —
+   the bot's password is generated and never shown; only its access token lands in `.env`.
+8. **Checks it from the outside** — the app, the token server, the push gateway, the voice
+   server, the homeserver and federation, each fetched over HTTPS at its real address — then
+   prints a summary (saved; `purrlor info` shows it again) and installs the `purrlor` command.
 
-Either way it checks for and installs missing tools (Docker, certbot, nginx), generates all the
-secrets from Step 5 (plus a Matrix registration token for Option B), writes `.env`, requests a TLS
-certificate covering every domain the chosen option needs, writes and enables the nginx config
-(including the federation/well-known blocks for Option B), and brings the stack up — then prints
-exactly what's left to do (Step 10), plus a firewall reminder about port 8448 for Option B. It
-assumes the standard single-host topology (nginx and the docker-compose stack on the same box) —
-for the split topology below, follow the manual steps instead; the script doesn't cover it. Safe
-to re-run: it asks before overwriting an existing `.env` (keeping it keeps every secret and
-account, and only updates the settings you just answered), skips homeserver accounts that already
-exist, and skips re-requesting a certificate that's already valid.
+It assumes the standard single-host layout (nginx and the stack on the same box); for the split
+topology below, follow the manual steps. Safe to re-run: it asks before overwriting `.env`
+(keeping it keeps every secret and account and only updates what you just answered), skips
+accounts that already exist, and reuses the certificate when it still covers everything.
 
 ## Outbound proxy (optional)
 
@@ -463,6 +494,8 @@ looking. Still hides the origin IP behind the TURN relay's own IP, which is the 
   output). Also double check port **8448/tcp** is actually open at the provider firewall level,
   not just the OS firewall — this is the single most common miss, since it's easy to open 80/443
   and forget the federation port entirely.
+- **Start with `purrlor doctor`.** It checks DNS, HTTPS, each service and the certificate from
+  the outside, and says which part is failing.
 - **CORS errors in the browser console calling the token server or push gateway.** `.env`'s
   `ALLOWED_ORIGINS` doesn't match the origin you're actually loading the app from — it has to be
   the exact scheme+host the browser bar shows (`https://app.YOUR_DOMAIN`, not `www.` or a bare
@@ -481,12 +514,21 @@ looking. Still hides the origin IP behind the TURN relay's own IP, which is the 
 
 ## Maintaining a running deployment
 
-- **Updating:** `git pull`, then `docker compose -f deploy/docker-compose.yml --env-file .env up
-  -d --build` again — only changed images get rebuilt.
-- **Cert renewal:** automatic via certbot's systemd timer (`systemctl list-timers | grep
-  certbot`) plus the reload hook from Step 7 — nothing to do unless `certbot renew --dry-run`
-  ever stops succeeding.
-- **Logs:** `docker compose -f deploy/docker-compose.yml logs -f <service>` (`livekit`,
-  `token-server`, `push-gateway`, `web`, or — with the bundled homeserver — `matrix`).
-- **Backups:** `.env` and `/etc/letsencrypt` are the only state outside of git and the Matrix
-  homeserver itself (which holds all real user data) — everything else rebuilds from the repo.
+The installer links a `purrlor` command into `/usr/local/bin`:
+
+- **`purrlor update`** — `git pull`, rebuild what changed, restart onto it, and clear out the old
+  images. (By hand: `git pull`, then `docker compose -f deploy/docker-compose.yml --env-file .env
+  up -d --build`, adding `--profile matrix` with the bundled homeserver.)
+- **`purrlor status`** / **`purrlor doctor`** — what's running, from the inside and the outside.
+- **`purrlor logs [service]`** — `livekit`, `token-server`, `push-gateway`, `web`, or — with the
+  bundled homeserver — `matrix`.
+- **`purrlor backup [dir]`** — `.env` and the homeserver's database in one file (the homeserver
+  stops for the few seconds the copy takes, so it's consistent). Copy it off the server.
+- **`purrlor new-invite-code`**, **`open-signups`**, **`close-signups`** — who can join the bundled
+  homeserver.
+- **Cert renewal** is automatic via certbot's systemd timer (`systemctl list-timers | grep
+  certbot`) plus the nginx reload hook — nothing to do unless `certbot renew --dry-run` ever stops
+  succeeding.
+- **What to back up:** `.env` and the homeserver's data (`purrlor backup` covers both), and
+  `/etc/letsencrypt` if you'd rather not re-issue certificates after a rebuild. Everything else
+  rebuilds from the repo.

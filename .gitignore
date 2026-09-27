@@ -7,3 +7,7 @@ dist/
 # Real TLS cert/key material copied here by deploy/setup.sh when TURN hardening is enabled — see
 # deploy/livekit-certs/.gitkeep.
 deploy/livekit-certs/*.pem
+
+# Written on the server by deploy/setup.sh and `purrlor backup` — they hold secrets.
+.install-summary
+backups/

@@ -1,4 +1,5 @@
 import type { MatrixClient } from 'matrix-js-sdk';
+import { getRuntimeConfig } from '../app/runtimeConfig';
 import { getOpenIdTokenCached } from './openIdToken';
 
 /**
@@ -11,9 +12,11 @@ const PUSH_GATEWAY_ACCOUNT_DATA_EVENT = 'xyz.nekous.push_gateway';
 const APP_ID = 'xyz.nekous.webpush';
 const PUSHKEY_STORAGE_KEY = 'nekous_push_pushkey';
 
+/** The gateway you picked in Account Settings, else this deployment's own (runtimeConfig.ts) —
+ *  so on a standard install, turning notifications on is one switch, not a URL to find. */
 export function readPushGatewayUrl(mx: MatrixClient): string | undefined {
   const content = mx.getAccountData(PUSH_GATEWAY_ACCOUNT_DATA_EVENT as any)?.getContent<{ url?: string }>();
-  return content?.url || undefined;
+  return content?.url || getRuntimeConfig().pushGateway || undefined;
 }
 
 export async function setPushGatewayUrl(mx: MatrixClient, url: string): Promise<void> {

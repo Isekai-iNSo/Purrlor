@@ -144,6 +144,12 @@ services:
       # Locks the login/register screens to this one homeserver (apps/web/src/app/runtimeConfig.ts).
       # Unset: they ask for one, as a general-purpose Matrix client would.
       - PURRLOR_HOMESERVER_URL=${PURRLOR_HOMESERVER_URL:-}
+      # This deployment's voice server and push gateway, so Spaces and accounts on it work without
+      # anyone pasting URLs into settings (apps/web/src/matrix/deploymentDefaults.ts). Unset: set
+      # them per Space / per account in the app instead.
+      - PURRLOR_LIVEKIT_URL=${PURRLOR_LIVEKIT_URL:-}
+      - PURRLOR_TOKEN_ENDPOINT=${PURRLOR_TOKEN_ENDPOINT:-}
+      - PURRLOR_PUSH_GATEWAY_URL=${PURRLOR_PUSH_GATEWAY_URL:-}
     depends_on:
       - token-server
       - push-gateway

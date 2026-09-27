@@ -12,6 +12,21 @@ describe('parseRuntimeConfig', () => {
     expect(parseRuntimeConfig({ homeserver: '' })).toEqual({});
   });
 
+  it('reads the voice and push defaults alongside the homeserver, skipping empty ones', () => {
+    expect(
+      parseRuntimeConfig({
+        homeserver: 'https://matrix.example.com',
+        livekitUrl: 'wss://livekit.example.com',
+        tokenEndpoint: 'https://app.example.com/api/livekit/token',
+        pushGateway: '',
+      })
+    ).toEqual({
+      homeserver: 'https://matrix.example.com',
+      livekitUrl: 'wss://livekit.example.com',
+      tokenEndpoint: 'https://app.example.com/api/livekit/token',
+    });
+  });
+
   it('ignores anything that is not an object with a string homeserver', () => {
     expect(parseRuntimeConfig(null)).toEqual({});
     expect(parseRuntimeConfig('https://x')).toEqual({});

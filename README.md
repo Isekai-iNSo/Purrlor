@@ -100,8 +100,9 @@ Settings → Visibility → "Public space". A public join link on its own keeps 
 
 ### Notifications
 Desktop notifications work as soon as your browser grants permission. For notifications when no
-tab is open, set a push gateway URL once under Account Settings → Notifications (see
-[`docs/push-notifications.md`](docs/push-notifications.md) if you're self-hosting one). You're
+tab is open, turn on background notifications under Account Settings → Notifications — on a
+standard install the push gateway is already filled in (see
+[`docs/push-notifications.md`](docs/push-notifications.md) for how it works). You're
 also told when someone comments on or likes your post, or replies to your comment. Account
 Settings → **Posts** turns comment and like notifications on or off.
 
@@ -264,37 +265,58 @@ set a nickname scoped to just that Space, independent of your global display nam
 
 ## Self-hosting
 
-`deploy/docker-compose.yml` builds and runs Purrlor's own services: LiveKit, the token server, the
-push gateway, and the web client (served by nginx), plus an optional bundled Matrix homeserver.
-The guided installer sets that homeserver up by default (a lightweight, federation-capable
-[Continuwuity](https://continuwuity.org/), with your admin account and the voice bot's account
-created for you, and invite-only or closed sign-up) and locks the web client to it. You can also
-point the stack at a homeserver you already run instead. Optional extras: an outbound HTTP(S)
-proxy for hosts that can't reach the internet directly, and TURN relay hardening to hide the
-server's IP. See [`docs/deployment.md`](docs/deployment.md) for the full walkthrough.
+Your own Purrlor — chat, voice and video, posts, and its own Matrix homeserver — on one server,
+in about ten minutes.
 
-Quick version, if you already know your way around this:
+### What you need
 
-```bash
-cp .env.example .env   # fill in LiveKit keys, HOST_IP, the token server's bot credentials, VAPID keys
-docker compose -f deploy/docker-compose.yml --env-file .env up --build
-```
+- **A server** running Debian 12 or Ubuntu 22.04/24.04, with a public IP and root access.
+  2 GB of RAM is enough to run it (the installer adds swap if the build needs more).
+- **A domain** you can add DNS records to.
+- These ports open at your provider's firewall: **80, 443, 7881/tcp, 7882/udp**, and **8448**
+  for Matrix federation. The installer opens them in `ufw` for you if it's active.
 
-Or run the guided installer on a fresh VPS instead of doing it by hand:
+### Install
+
+SSH into the server and run:
 
 ```bash
-sudo bash deploy/setup.sh
+curl -fsSL https://raw.githubusercontent.com/m0nnnna/Purrlor/master/install.sh | sudo bash
 ```
 
-It asks a handful of questions (whether this host needs an outbound proxy, domain, whether to
-provision a homeserver or use yours, who may sign up, whether to lock the web client to that
-homeserver, whether to enable TURN hardening), then handles Docker/certbot/nginx installation,
-secret generation, homeserver accounts, TLS certificates, and bringing the stack up.
+It downloads Purrlor into `/opt/purrlor` and asks a few questions: your domain, your email, and
+the name and password for your admin account. Then it shows you the DNS records to create
+(usually four: `app.`, `livekit.`, `matrix.` and the domain itself) and waits, checking, until
+they're in place. After that it does the rest on its own — installs Docker, nginx and certbot, sets
+up the homeserver with your account, gets HTTPS certificates, and starts everything — and checks
+the finished install from the outside, the way a browser would.
 
-After the stack is up, each Space still needs its LiveKit URL and token endpoint set once, in-app
-under Space Settings, and each account needs its push gateway URL set once under Account
-Settings — see [`docs/voice-architecture.md`](docs/voice-architecture.md)'s "State events" section
-for why voice config in particular is per-Space rather than baked into `.env`.
+When it's done, open `https://app.<your domain>` and log in. Voice channels and notifications
+already work; there's nothing to configure in the app. To invite people, give them the sign-up
+code the installer printed.
+
+### Afterwards
+
+The installer adds a `purrlor` command:
+
+| Command | What it does |
+|---|---|
+| `purrlor info` | The install summary again: the address, how to log in, the sign-up code |
+| `purrlor status` | What's running, and whether each part answers |
+| `purrlor doctor` | Checks everything from the outside and says what's wrong (DNS, firewall, certificate) |
+| `purrlor update` | Pulls the latest Purrlor and restarts onto it |
+| `purrlor logs [service]` | Follows the logs |
+| `purrlor backup` | Saves your settings and the homeserver's data to a file |
+| `purrlor new-invite-code` | Replaces the sign-up code |
+| `purrlor open-signups` / `close-signups` | Allows or stops new sign-ups |
+
+### Other setups
+
+The installer also handles a homeserver you already run (Synapse, Conduit, …) instead of the
+bundled one, a server that can only reach the internet through a proxy, and a TURN relay to hide
+the server's IP from people in calls — it asks. To run it from a checkout you already have:
+`sudo bash deploy/setup.sh`. For doing everything by hand, running nginx on a different machine,
+and what every piece is for, see [`docs/deployment.md`](docs/deployment.md).
 
 ## Development
 

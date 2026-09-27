@@ -8,7 +8,7 @@ import { EventType, type MatrixClient, type MatrixEvent, type Room } from 'matri
  * automatically). Same read/write/hook shape as every other custom marker in this codebase
  * (emotes, pins, channel type).
  */
-const VOICE_SERVER_EVENT = 'xyz.nekous.voice_server';
+export const VOICE_SERVER_EVENT = 'xyz.nekous.voice_server';
 
 export type VoiceServerConfig = {
   url: string;

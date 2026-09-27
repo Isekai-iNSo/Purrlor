@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # Guided, interactive production setup for Purrlor — see docs/deployment.md for the full
 # explanation of what each step below does and why. This script automates the mechanical parts
-# of that guide: an optional outbound proxy, installing Docker/certbot/nginx, provisioning a
-# Matrix homeserver (Continuwuity) with your admin account and the voice bot's account already
-# created — or wiring up one you already run — generating secrets, requesting a TLS certificate,
-# writing the nginx config, locking the web client to that homeserver, and bringing the
-# docker-compose stack up. The two in-app settings (Step 10 in the guide) still need you.
+# of that guide: checking the server is big enough (adding swap if it isn't), an optional outbound
+# proxy, installing Docker/certbot/nginx, provisioning a Matrix homeserver (Continuwuity) with
+# your admin account and the voice bot's account already created — or wiring up one you already
+# run — generating secrets, walking you through DNS, requesting a TLS certificate, writing the
+# nginx config, opening the firewall, and bringing the docker-compose stack up with voice and push
+# already pointed at this deployment. Nothing is left to set inside the app.
 #
-# Run from the repo root, as root: sudo bash deploy/setup.sh
+# The easy way in is the one-line installer (install.sh at the repo root), which clones the repo
+# and runs this. By hand, from the repo root, as root: sudo bash deploy/setup.sh
 # Safe to re-run: it asks before overwriting an existing .env (keeping it keeps every secret and
 # account in it), skips accounts that already exist, and skips re-requesting a certificate that's
 # already valid for the domains you enter.
@@ -164,6 +166,63 @@ fi
 log "Purrlor guided deploy — see docs/deployment.md for the full explanation of each step."
 
 # ---------------------------------------------------------------------------
+# Is this server big enough?
+# ---------------------------------------------------------------------------
+
+log "Checking this server"
+
+# Building the web client needs ~3-4 GB of memory at its peak, and a small VPS without swap gets
+# the build killed part-way with nothing more helpful than "exit code 137". Swap turns that into a
+# slower build instead of a failed one — and the running stack itself is happy on 1-2 GB.
+MEM_MB="$(awk '/^MemTotal:/ {print int($2/1024)}' /proc/meminfo)"
+SWAP_MB="$(awk '/^SwapTotal:/ {print int($2/1024)}' /proc/meminfo)"
+echo "  memory: ${MEM_MB} MB RAM, ${SWAP_MB} MB swap"
+if [ $((MEM_MB + SWAP_MB)) -lt 3800 ]; then
+  if [ -f /swapfile ]; then
+    warn "Less than 4 GB of memory+swap, and /swapfile already exists (not active?). The build may run
+    out of memory — enable more swap by hand if it fails."
+  else
+    SWAP_TO_ADD=$((4096 - MEM_MB - SWAP_MB))
+    [ "$SWAP_TO_ADD" -lt 1024 ] && SWAP_TO_ADD=1024
+    echo "  Building Purrlor needs about 4 GB of memory; this server has less. Adding a ${SWAP_TO_ADD} MB"
+    echo "  swap file fixes that (it's only really used while building)."
+    if confirm "Add a ${SWAP_TO_ADD} MB swap file at /swapfile?" y; then
+      fallocate -l "${SWAP_TO_ADD}M" /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count="$SWAP_TO_ADD" status=none
+      chmod 600 /swapfile
+      mkswap /swapfile >/dev/null
+      swapon /swapfile
+      grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+      echo "  ok   swap added (and kept across reboots)"
+    else
+      warn "Continuing without swap — if the build fails with exit code 137, re-run and say yes."
+    fi
+  fi
+else
+  echo "  ok   enough memory to build"
+fi
+
+DISK_FREE_GB="$(df -Pk "$REPO_ROOT" | awk 'NR==2 {print int($4/1048576)}')"
+if [ "$DISK_FREE_GB" -lt 8 ]; then
+  warn "Only ${DISK_FREE_GB} GB of disk free here. Docker images and the build need about 8 GB, plus
+    room for uploaded media over time."
+  confirm "Continue anyway?" n || die "Free up some disk space (or use a bigger disk), then re-run."
+else
+  echo "  ok   ${DISK_FREE_GB} GB of disk free"
+fi
+
+# Something other than nginx on 80/443 (Apache, Caddy, another stack's proxy) would make both the
+# certificate request and nginx fail later with a much less obvious message.
+for port in 80 443; do
+  HOLDER="$(ss -ltnpH "sport = :$port" 2>/dev/null | grep -o 'users:(("[^"]*"' | head -n1 | cut -d'"' -f2 || true)"
+  if [ -n "$HOLDER" ] && [ "$HOLDER" != nginx ]; then
+    die "Port $port is already in use by '$HOLDER'. Purrlor's nginx needs ports 80 and 443 — stop and
+    disable '$HOLDER' (e.g. systemctl disable --now $HOLDER), or use a server that isn't already
+    running a website, then re-run."
+  fi
+done
+echo "  ok   ports 80 and 443 are free (or already nginx's)"
+
+# ---------------------------------------------------------------------------
 # Outbound proxy (first, because everything after this may need the internet)
 # ---------------------------------------------------------------------------
 
@@ -221,12 +280,20 @@ fi
 # Collect configuration
 # ---------------------------------------------------------------------------
 
-ask "Base domain (e.g. example.com)" ""
-BASE_DOMAIN="$REPLY_VALUE"
+log "Domains"
+echo "Purrlor lives on a few subdomains of a domain you own: the app itself, and its voice server"
+echo "(plus the Matrix homeserver, if this install runs one). You'll be shown exactly which DNS"
+echo "records to create in a moment."
+while true; do
+  ask "Your domain (e.g. example.com)" ""
+  BASE_DOMAIN="$(printf '%s' "$REPLY_VALUE" | tr 'A-Z' 'a-z' | sed -E 's#^[a-z]+://##; s#/.*$##; s#^\.+|\.+$##g')"
+  if printf '%s' "$BASE_DOMAIN" | grep -Eq '^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$'; then break; fi
+  echo "  (that doesn't look like a domain name — just the name, like example.com)"
+done
 
-ask "Web client subdomain" "app.$BASE_DOMAIN"
+ask "Address for the app" "app.$BASE_DOMAIN"
 APP_DOMAIN="$REPLY_VALUE"
-ask "LiveKit subdomain" "livekit.$BASE_DOMAIN"
+ask "Address for the voice/video server" "livekit.$BASE_DOMAIN"
 LIVEKIT_DOMAIN="$REPLY_VALUE"
 
 echo
@@ -238,10 +305,12 @@ else
   ENABLE_TURN=false
 fi
 
-ask "Token server subdomain" "token.$BASE_DOMAIN"
-TOKEN_DOMAIN="$REPLY_VALUE"
-ask "Push gateway subdomain" "push.$BASE_DOMAIN"
-PUSH_DOMAIN="$REPLY_VALUE"
+# The token server and push gateway are served under the app's own address
+# (https://APP/api/livekit/..., https://APP/api/push/...) — two fewer DNS records and certificate
+# names than giving each its own subdomain, and nothing for anyone to configure.
+TOKEN_ENDPOINT="https://$APP_DOMAIN/api/livekit/token"
+PUSH_GATEWAY_URL="https://$APP_DOMAIN/api/push"
+LIVEKIT_URL="wss://$LIVEKIT_DOMAIN"
 
 # Never through the proxy: this is the address people and other servers reach THIS host on, which
 # with a proxy configured is exactly what ifconfig.me would otherwise not report. Comes back empty
@@ -250,8 +319,12 @@ DETECTED_IP="$(curl -fsS -4 -m 10 --noproxy '*' ifconfig.me 2>/dev/null || true)
 ask "This VPS's public IP" "$DETECTED_IP"
 HOST_IP_VALUE="$REPLY_VALUE"
 
-ask "Admin email (for TLS cert registration and push notifications)" ""
-ADMIN_EMAIL="$REPLY_VALUE"
+while true; do
+  ask "Your email (Let's Encrypt sends certificate expiry warnings here)" ""
+  ADMIN_EMAIL="$REPLY_VALUE"
+  if printf '%s' "$ADMIN_EMAIL" | grep -Eq '^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$'; then break; fi
+  echo "  (that doesn't look like an email address)"
+done
 
 log "Matrix homeserver"
 echo "Purrlor is a Matrix client — it needs a homeserver to talk to. This install can run one for"
@@ -261,42 +334,94 @@ echo "created automatically. Only say no if you already run a homeserver you wan
 if confirm "Set up a new Matrix homeserver as part of this install?" y; then
   PROVISION_MATRIX=true
   MATRIX_DOMAIN="matrix.$BASE_DOMAIN"
-  MATRIX_SERVER_NAME="$BASE_DOMAIN"
   echo
-  echo "  It will be served at https://$MATRIX_DOMAIN, with accounts reading as @user:$BASE_DOMAIN."
-  echo "  That server name is permanent — it's baked into every account and room it ever creates."
-  confirm "Use $BASE_DOMAIN as the server name?" y || die "Re-run with the base domain you want in user IDs."
+  echo "  It will be served at https://$MATRIX_DOMAIN. Its *server name* is the part after the colon"
+  echo "  in everyone's address, and it's permanent — baked into every account and room it creates."
+  echo
+  # Using the bare domain for nicer addresses means this server has to answer for it (two small
+  # files that point Matrix at $MATRIX_DOMAIN). If the bare domain already hosts a website
+  # somewhere else, that would take it over — so in that case the default is the subdomain.
+  BASE_RESOLVES="$(getent ahostsv4 "$BASE_DOMAIN" 2>/dev/null | awk '{print $1}' | head -n1 || true)"
+  if [ -n "$BASE_RESOLVES" ] && [ "$BASE_RESOLVES" != "$HOST_IP_VALUE" ]; then
+    echo "  $BASE_DOMAIN already points somewhere else ($BASE_RESOLVES) — probably an existing website."
+    SERVER_NAME_DEFAULT=2
+  else
+    SERVER_NAME_DEFAULT=1
+  fi
+  choose "What should people's addresses look like?" "$SERVER_NAME_DEFAULT" \
+    "@name:$BASE_DOMAIN  (needs $BASE_DOMAIN itself pointed at this server — replaces any website there)" \
+    "@name:$MATRIX_DOMAIN  (leaves $BASE_DOMAIN alone — pick this if it hosts a website)"
+  if [ "$REPLY_CHOICE" = 1 ]; then
+    MATRIX_SERVER_NAME="$BASE_DOMAIN"
+    MATRIX_DELEGATED=true
+  else
+    MATRIX_SERVER_NAME="$MATRIX_DOMAIN"
+    MATRIX_DELEGATED=false
+  fi
 
   echo
   choose "Who can create accounts on it?" 1 \
-    "Invite-only: sign-up needs a registration token you hand out (recommended)" \
+    "Invite-only: people need a sign-up code you hand out (recommended)" \
     "Closed: only you and the voice bot; add people later from the admin room"
   if [ "$REPLY_CHOICE" = 1 ]; then MATRIX_REGISTRATION_MODE=token; else MATRIX_REGISTRATION_MODE=closed; fi
 else
   PROVISION_MATRIX=false
+  MATRIX_DELEGATED=false
 fi
 
-DNS_CHECK_DOMAINS=("$APP_DOMAIN" "$LIVEKIT_DOMAIN" "$TOKEN_DOMAIN" "$PUSH_DOMAIN")
+DNS_CHECK_DOMAINS=("$APP_DOMAIN" "$LIVEKIT_DOMAIN")
 if [ "$ENABLE_TURN" = true ]; then
   DNS_CHECK_DOMAINS+=("$TURN_DOMAIN")
 fi
 if [ "$PROVISION_MATRIX" = true ]; then
-  DNS_CHECK_DOMAINS+=("$BASE_DOMAIN" "$MATRIX_DOMAIN")
+  DNS_CHECK_DOMAINS+=("$MATRIX_DOMAIN")
+  if [ "$MATRIX_DELEGATED" = true ]; then DNS_CHECK_DOMAINS+=("$BASE_DOMAIN"); fi
 fi
 
+# dns_report -> prints one line per domain and returns 0 only if every one is right: an A record
+# for this server, and no AAAA record pointing elsewhere (Let's Encrypt prefers IPv6 when there is
+# one, so a stale AAAA fails the certificate even with a perfect A record).
+dns_report() {
+  local __all_ok=0 __d __v4 __v6 __my_v6
+  __my_v6="$(ip -6 addr show scope global 2>/dev/null | awk '/inet6/ {print $2}' | cut -d/ -f1 | tr '\n' ' ')"
+  for __d in "${DNS_CHECK_DOMAINS[@]}"; do
+    __v4="$(getent ahostsv4 "$__d" 2>/dev/null | awk '{print $1}' | head -n1 || true)"
+    __v6="$(getent ahostsv6 "$__d" 2>/dev/null | awk '{print $1}' | grep ':' | grep -v '^::ffff:' | head -n1 || true)"
+    if [ "$__v4" != "$HOST_IP_VALUE" ]; then
+      printf '  %-6s %-40s %s\n' "WAIT" "$__d" "-> ${__v4:-<no A record yet>} (needs $HOST_IP_VALUE)"
+      __all_ok=1
+    elif [ -n "$__v6" ] && ! printf ' %s ' "$__my_v6" | grep -q " $__v6 "; then
+      printf '  %-6s %-40s %s\n' "FIX" "$__d" "-> has an AAAA (IPv6) record $__v6 that isn't this server — delete it"
+      __all_ok=1
+    else
+      printf '  %-6s %-40s %s\n' "ok" "$__d" "-> $__v4"
+    fi
+  done
+  return $__all_ok
+}
+
+log "DNS"
+echo "At your DNS provider, create these records (type A, pointing at this server):"
 echo
-echo "DNS check — each of the following should already point at $HOST_IP_VALUE:"
 for d in "${DNS_CHECK_DOMAINS[@]}"; do
-  resolved="$(getent hosts "$d" 2>/dev/null | awk '{print $1}' | head -n1 || true)"
-  if [ "$resolved" = "$HOST_IP_VALUE" ]; then
-    echo "  ok   $d -> $resolved"
-  else
-    echo "  WAIT $d -> ${resolved:-<not resolving>} (expected $HOST_IP_VALUE)"
-  fi
+  printf '    %-40s A    %s\n' "$d" "$HOST_IP_VALUE"
 done
-if ! confirm "Continue anyway?" y; then
-  die "Fix DNS first, then re-run this script."
-fi
+echo
+echo "Using Cloudflare? Set them to \"DNS only\" (grey cloud), not proxied — voice and video can't"
+echo "go through Cloudflare's proxy. New records usually work within a few minutes."
+while true; do
+  echo
+  if dns_report; then
+    echo "  All set."
+    break
+  fi
+  echo
+  read -r -p "Press Enter to check again, c to continue anyway, or q to quit: " __dns_answer || true
+  case "$__dns_answer" in
+    c|C) warn "Continuing with DNS not ready — the certificate request below will fail for any name that isn't pointed here yet."; break ;;
+    q|Q) die "Re-run this script once the records are in place." ;;
+  esac
+done
 
 if [ "$PROVISION_MATRIX" = true ]; then
   log "New homeserver accounts (both get created automatically once the homeserver is up)"
@@ -436,6 +561,11 @@ fi
 if [ "$KEEP_ENV" = true ]; then
   log "Keeping existing .env, updating this run's settings in it"
   env_set PURRLOR_HOMESERVER_URL "$PURRLOR_HOMESERVER_URL"
+  env_set PURRLOR_LIVEKIT_URL "$LIVEKIT_URL"
+  env_set PURRLOR_TOKEN_ENDPOINT "$TOKEN_ENDPOINT"
+  env_set PURRLOR_PUSH_GATEWAY_URL "$PUSH_GATEWAY_URL"
+  env_set ALLOWED_ORIGINS "https://$APP_DOMAIN"
+  env_set HOST_IP "$HOST_IP_VALUE"
   env_set OUTBOUND_PROXY "$OUTBOUND_PROXY"
   env_set OUTBOUND_NO_PROXY "$OUTBOUND_NO_PROXY"
 
@@ -506,6 +636,12 @@ VAPID_SUBJECT=mailto:$ADMIN_EMAIL
 # The homeserver the web client's login screen is locked to (empty: it asks).
 PURRLOR_HOMESERVER_URL=$PURRLOR_HOMESERVER_URL
 
+# This deployment's voice server and push gateway. Spaces and accounts use them automatically, so
+# nobody has to paste URLs into settings.
+PURRLOR_LIVEKIT_URL=$LIVEKIT_URL
+PURRLOR_TOKEN_ENDPOINT=$TOKEN_ENDPOINT
+PURRLOR_PUSH_GATEWAY_URL=$PUSH_GATEWAY_URL
+
 # Outbound HTTP(S) proxy for the services that reach the internet (empty: direct).
 OUTBOUND_PROXY=$OUTBOUND_PROXY
 OUTBOUND_NO_PROXY=$OUTBOUND_NO_PROXY
@@ -539,8 +675,22 @@ fi
 # ---------------------------------------------------------------------------
 
 CERT_DIR="/etc/letsencrypt/live/$APP_DOMAIN"
-if [ -d "$CERT_DIR" ] && confirm "A certificate for $APP_DOMAIN already exists — skip requesting a new one?" y; then
-  log "Reusing existing certificate at $CERT_DIR"
+
+# cert_covers_all -> succeeds when the existing certificate names every domain this run needs. A
+# re-run that adds one (turning on TURN, say) has to get a new certificate, or that name serves
+# someone else's certificate and browsers refuse it.
+cert_covers_all() {
+  local __sans __d
+  [ -f "$CERT_DIR/fullchain.pem" ] || return 1
+  __sans="$(openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -ext subjectAltName 2>/dev/null | tr ',' '\n' | sed -n 's/.*DNS://p')"
+  for __d in "${DNS_CHECK_DOMAINS[@]}"; do
+    printf '%s\n' "$__sans" | grep -qx "$__d" || return 1
+  done
+  openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -checkend 2592000 >/dev/null 2>&1
+}
+
+if cert_covers_all; then
+  log "Reusing the existing certificate at $CERT_DIR (it covers every domain and isn't about to expire)"
 else
   log "Requesting a TLS certificate (stopping nginx briefly to free port 80)"
   systemctl stop nginx 2>/dev/null || true
@@ -548,7 +698,9 @@ else
   for d in "${DNS_CHECK_DOMAINS[@]}"; do
     CERTBOT_DOMAIN_ARGS+=(-d "$d")
   done
-  certbot certonly --standalone \
+  # --cert-name keeps it at the same path when a re-run adds a name, instead of creating
+  # $APP_DOMAIN-0001 alongside the one nginx is configured to use.
+  certbot certonly --standalone --cert-name "$APP_DOMAIN" --expand \
     "${CERTBOT_DOMAIN_ARGS[@]}" \
     --agree-tos -m "$ADMIN_EMAIL" --no-eff-email --non-interactive \
     || die "certbot failed — check DNS has propagated for all domains and that port 80 is reachable from the internet, then re-run."
@@ -660,8 +812,19 @@ server {
         proxy_set_header X-Forwarded-Proto \$scheme;
     }
 
+    # The token server, under the app's own address — what PURRLOR_TOKEN_ENDPOINT points at.
     location /api/livekit/ {
         proxy_pass http://127.0.0.1:3001/api/livekit/;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+
+    # The push gateway, likewise (PURRLOR_PUSH_GATEWAY_URL). The trailing slashes strip the
+    # prefix: /api/push/subscribe reaches the gateway as /subscribe.
+    location /api/push/ {
+        proxy_pass http://127.0.0.1:3002/;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
@@ -689,45 +852,13 @@ server {
     }
 }
 
-server {
-    listen 443 ssl http2;
-    server_name $TOKEN_DOMAIN;
-
-    ssl_certificate $CERT_DIR/fullchain.pem;
-    ssl_certificate_key $CERT_DIR/privkey.pem;
-
-    location / {
-        proxy_pass http://127.0.0.1:3001;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-    }
-}
-
-server {
-    listen 443 ssl http2;
-    server_name $PUSH_DOMAIN;
-
-    ssl_certificate $CERT_DIR/fullchain.pem;
-    ssl_certificate_key $CERT_DIR/privkey.pem;
-
-    location / {
-        proxy_pass http://127.0.0.1:3002;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-    }
-}
 NGINX_EOF
 
-REDIRECT_DOMAINS="$APP_DOMAIN $LIVEKIT_DOMAIN $TOKEN_DOMAIN $PUSH_DOMAIN"
+REDIRECT_DOMAINS="$APP_DOMAIN $LIVEKIT_DOMAIN"
 
 if [ "$PROVISION_MATRIX" = true ]; then
-  REDIRECT_DOMAINS="$REDIRECT_DOMAINS $BASE_DOMAIN $MATRIX_DOMAIN"
-  echo "  ok   adding nginx blocks for the new homeserver ($MATRIX_DOMAIN, federation on 8448," \
-       "well-known delegation on $BASE_DOMAIN)"
+  REDIRECT_DOMAINS="$REDIRECT_DOMAINS $MATRIX_DOMAIN"
+  echo "  ok   adding nginx blocks for the new homeserver ($MATRIX_DOMAIN, federation on 8448)"
   cat >> /etc/nginx/sites-available/purrlor.conf <<MATRIX_NGINX_EOF
 
 server {
@@ -770,6 +901,12 @@ server {
     }
 }
 
+MATRIX_NGINX_EOF
+  if [ "$MATRIX_DELEGATED" = true ]; then
+    REDIRECT_DOMAINS="$REDIRECT_DOMAINS $BASE_DOMAIN"
+    echo "  ok   and well-known delegation on $BASE_DOMAIN (addresses read @name:$BASE_DOMAIN)"
+    cat >> /etc/nginx/sites-available/purrlor.conf <<DELEGATION_NGINX_EOF
+
 server {
     # The bare domain is never a real endpoint of its own — it only exists so Matrix user IDs
     # read as a clean @user:$BASE_DOMAIN while the actual homeserver runs at $MATRIX_DOMAIN.
@@ -793,7 +930,8 @@ server {
         return 301 https://$APP_DOMAIN\$request_uri;
     }
 }
-MATRIX_NGINX_EOF
+DELEGATION_NGINX_EOF
+  fi
 fi
 
 cat >> /etc/nginx/sites-available/purrlor.conf <<REDIRECT_EOF
@@ -808,18 +946,46 @@ REDIRECT_EOF
 # Earlier versions of this script wrote the same server blocks as nekous.conf, the project's old
 # name. Left enabled next to purrlor.conf, every domain would be defined twice. Disabled and kept
 # as a .bak rather than deleted, in case it was hand-edited.
-if [ -e /etc/nginx/sites-enabled/purrlor.conf ] || [ -e /etc/nginx/sites-available/purrlor.conf ]; then
-  rm -f /etc/nginx/sites-enabled/purrlor.conf
-  if [ -f /etc/nginx/sites-available/purrlor.conf ]; then
-    mv /etc/nginx/sites-available/purrlor.conf /etc/nginx/sites-available/purrlor.conf.bak
+if [ -e /etc/nginx/sites-enabled/nekous.conf ] || [ -e /etc/nginx/sites-available/nekous.conf ]; then
+  rm -f /etc/nginx/sites-enabled/nekous.conf
+  if [ -f /etc/nginx/sites-available/nekous.conf ]; then
+    mv /etc/nginx/sites-available/nekous.conf /etc/nginx/sites-available/nekous.conf.bak
   fi
-  echo "  ok   retired the old nekous.conf (kept as sites-available/purrlor.conf.bak)"
+  echo "  ok   retired the old nekous.conf (kept as sites-available/nekous.conf.bak)"
 fi
+
+# Debian/Ubuntu's stock site answers every name on port 80 as default_server; harmless next to
+# ours, but it's a "Welcome to nginx" page for anything that reaches this IP by mistake.
+rm -f /etc/nginx/sites-enabled/default
 
 ln -sf /etc/nginx/sites-available/purrlor.conf /etc/nginx/sites-enabled/purrlor.conf
 nginx -t || die "nginx config test failed — check /etc/nginx/sites-available/purrlor.conf"
 systemctl restart nginx
 echo "  ok   nginx configured and running"
+
+# ---------------------------------------------------------------------------
+# Firewall
+# ---------------------------------------------------------------------------
+
+# What has to be reachable from the internet. 7881/7882 carry the voice and video themselves and
+# can't go through nginx; without them calls connect and then hear nothing.
+FIREWALL_PORTS=("80/tcp" "443/tcp" "7881/tcp" "7882/udp")
+if [ "$PROVISION_MATRIX" = true ]; then FIREWALL_PORTS+=("8448/tcp"); fi
+if [ "$ENABLE_TURN" = true ]; then FIREWALL_PORTS+=("5349/tcp" "3478/udp"); fi
+
+log "Firewall"
+if need_cmd ufw && ufw status 2>/dev/null | grep -q '^Status: active'; then
+  echo "ufw is active on this server. Purrlor needs: ${FIREWALL_PORTS[*]} (and SSH stays open)."
+  if confirm "Open those ports in ufw?" y; then
+    ufw allow OpenSSH >/dev/null 2>&1 || ufw allow 22/tcp >/dev/null
+    for port in "${FIREWALL_PORTS[@]}"; do ufw allow "$port" >/dev/null; done
+    echo "  ok   ufw allows ${FIREWALL_PORTS[*]}"
+  fi
+else
+  echo "  ok   no local firewall to change (ufw isn't active)"
+fi
+echo "  If your provider has its own firewall (AWS security groups, Hetzner/Oracle/GCP firewall"
+echo "  rules...), open these there too: ${FIREWALL_PORTS[*]}"
 
 # ---------------------------------------------------------------------------
 # Bring the stack up
@@ -834,7 +1000,7 @@ if [ "$PROVISION_MATRIX" = true ]; then
 
   log "Waiting for it to come up"
   MATRIX_UP=false
-  for i in $(seq 1 30); do
+  for _ in $(seq 1 30); do
     if curl -fsS -o /dev/null "http://127.0.0.1:8008/_matrix/client/versions" 2>/dev/null; then
       MATRIX_UP=true
       break
@@ -906,86 +1072,102 @@ fi
 log "Building and starting the rest of the Purrlor stack (this can take a few minutes the first time)"
 docker compose -f deploy/docker-compose.yml --env-file .env "${COMPOSE_PROFILE_ARGS[@]}" up -d --build
 
-log "Checking service health"
-sleep 3
-if curl -fsS http://127.0.0.1:3001/health >/dev/null 2>&1; then
-  echo "  ok   token server"
-else
-  warn "token server didn't respond on /health yet — check: docker compose -f deploy/docker-compose.yml logs token-server"
-fi
-if curl -fsS -o /dev/null http://127.0.0.1:8080 2>/dev/null; then
-  echo "  ok   web client"
-else
-  warn "web client didn't respond yet — check: docker compose -f deploy/docker-compose.yml logs web"
-fi
+log "Checking everything from the outside (the way a browser would)"
 
-# ---------------------------------------------------------------------------
-# Done — what's left
-# ---------------------------------------------------------------------------
+# check LABEL COMMAND... -> runs COMMAND a few times (services take a moment after `up`), prints
+# ok/FAIL, and counts failures for the summary.
+CHECK_FAILURES=0
+check() {
+  local __label="$1"; shift
+  local __i
+  for __i in 1 2 3 4 5 6 7 8 9 10; do
+    if "$@" >/dev/null 2>&1; then echo "  ok   $__label"; return 0; fi
+    sleep 3
+  done
+  echo "  FAIL $__label"
+  CHECK_FAILURES=$((CHECK_FAILURES + 1))
+  return 0
+}
+# Straight at this server, whatever the DNS cache on this box says, and never via the outbound
+# proxy — this is checking the way in, not the way out.
+public_get() { curl -fsS -m 10 --noproxy '*' --resolve "$1:443:$HOST_IP_VALUE" "https://$1$2"; }
+# Captured first, not piped: with pipefail, grep -q quitting early can fail the pipeline.
+body_has() { local __body; __body="$(public_get "$1" "$2")" && grep -q -- "$3" <<<"$__body"; }
 
-log "Stack is up. Two things still need doing inside the app itself (see docs/deployment.md Step 10):"
-
-LOG_SERVICES="livekit|token-server|push-gateway|web"
+check "app loads at https://$APP_DOMAIN" public_get "$APP_DOMAIN" /
+check "app knows its voice server and push gateway" body_has "$APP_DOMAIN" /config.json "$LIVEKIT_DOMAIN"
+check "token server answers at /api/livekit" body_has "$APP_DOMAIN" /api/livekit/config botUserId
+check "push gateway answers at /api/push" body_has "$APP_DOMAIN" /api/push/health ok
+check "voice server answers at https://$LIVEKIT_DOMAIN" public_get "$LIVEKIT_DOMAIN" /
 if [ "$PROVISION_MATRIX" = true ]; then
-  LOGIN_LINE="log in as @$ADMIN_LOCALPART:$BASE_DOMAIN (the account just created — it's the homeserver's admin)"
-  UPDATE_CMD="git pull && docker compose -f deploy/docker-compose.yml --env-file .env --profile matrix up -d --build"
-  LOG_SERVICES="$LOG_SERVICES|matrix"
-else
-  LOGIN_LINE="log in with your existing homeserver account"
-  UPDATE_CMD="git pull && docker compose -f deploy/docker-compose.yml --env-file .env up -d --build"
+  check "homeserver answers at https://$MATRIX_DOMAIN" body_has "$MATRIX_DOMAIN" /_matrix/client/versions versions
+  if [ "$MATRIX_DELEGATED" = true ]; then
+    check "$BASE_DOMAIN points Matrix at $MATRIX_DOMAIN" body_has "$BASE_DOMAIN" /.well-known/matrix/server "$MATRIX_DOMAIN"
+  fi
+  check "federation port 8448 answers" curl -fsS -m 10 --noproxy '*' --resolve "$MATRIX_DOMAIN:8448:$HOST_IP_VALUE" "https://$MATRIX_DOMAIN:8448/_matrix/federation/v1/version"
 fi
 
-HOMESERVER_NOTE=""
+# ---------------------------------------------------------------------------
+# Done
+# ---------------------------------------------------------------------------
+
+if [ "$PROVISION_MATRIX" = true ]; then
+  LOGIN_LINE="Log in as @$ADMIN_LOCALPART:$MATRIX_SERVER_NAME with the password you chose (it's the homeserver's admin)."
+else
+  LOGIN_LINE="Log in with your existing account on $HOMESERVER_URL."
+fi
+
+SIGNUP_NOTE=""
 if [ "$PROVISION_MATRIX" = true ]; then
   if [ "$MATRIX_REGISTRATION_MODE" = token ]; then
-    HOMESERVER_NOTE="
-Sign-up on $MATRIX_SERVER_NAME is invite-only. Give this registration token to people you want
-to let in — Purrlor's register screen asks for it:
+    SIGNUP_NOTE="Inviting people: sign-up is invite-only. Give them this sign-up code (the register
+screen asks for it):
+
     $MATRIX_REGISTRATION_TOKEN
-(it's MATRIX_REGISTRATION_TOKEN in .env; change it there and re-run 'up -d' to revoke it)."
+
+To revoke it and make a new one:  purrlor new-invite-code"
   else
-    HOMESERVER_NOTE="
-Sign-up on $MATRIX_SERVER_NAME is closed. Create accounts from the admin room in Purrlor
-('!admin users create-user <name>'), or set MATRIX_ALLOW_REGISTRATION=true in .env to reopen
-it behind the registration token."
+    SIGNUP_NOTE="Inviting people: sign-up is closed. Create accounts from the admin room in Purrlor
+('!admin users create-user <name>'), or open invite-only sign-up with:  purrlor open-signups"
   fi
 fi
-if [ -n "$PURRLOR_HOMESERVER_URL" ]; then
-  HOMESERVER_NOTE="$HOMESERVER_NOTE
-The web client is locked to $PURRLOR_HOMESERVER_URL (PURRLOR_HOMESERVER_URL in .env)."
-fi
-if [ -n "$OUTBOUND_PROXY" ]; then
-  HOMESERVER_NOTE="$HOMESERVER_NOTE
-Outbound traffic goes through $(mask_url "$OUTBOUND_PROXY") (OUTBOUND_PROXY in .env; the Docker
-daemon and certbot renewal have their own copies in /etc/systemd/system/*.d/purrlor-proxy.conf)."
-fi
 
-FIREWALL_NOTE=""
-if [ "$PROVISION_MATRIX" = true ]; then
-  FIREWALL_NOTE="$FIREWALL_NOTE
-Also open port 8448/tcp (Matrix federation) at your provider's firewall/security-group level,
-alongside 80/443/7881/7882 — the new homeserver won't federate without it."
-fi
-if [ "$ENABLE_TURN" = true ]; then
-  FIREWALL_NOTE="$FIREWALL_NOTE
-Also open ports 5349/tcp and 3478/udp (TURN relay) at your provider's firewall/security-group
-level, alongside 80/443/7881/7882 — the TURN relay won't work without them."
+FAIL_NOTE=""
+if [ "$CHECK_FAILURES" -gt 0 ]; then
+  FAIL_NOTE="
+!! $CHECK_FAILURES check(s) above failed. Usual causes: a DNS record that isn't pointing here yet,
+!! or your provider's firewall blocking a port. See what's wrong with:  purrlor doctor
+"
 fi
 
-cat <<SUMMARY
+SUMMARY_TEXT="Purrlor is installed.
 
-  1. Open https://$APP_DOMAIN, $LOGIN_LINE, then in the Settings of any
-     Space you want voice/video in (Space Settings -> General) set:
-       LiveKit URL:      wss://$LIVEKIT_DOMAIN
-       Token endpoint:   https://$TOKEN_DOMAIN
-     The "Voice service account" field fills itself in with $BOT_USER_ID
-     once you leave the token endpoint field - leave it as it lands. Voice channels
-     invite that account themselves from then on; you don't have to.
+Open:     https://$APP_DOMAIN
+$LOGIN_LINE
 
-  2. In Account Settings -> Notifications, set the push gateway URL:
-       https://$PUSH_DOMAIN
-$HOMESERVER_NOTE
-$FIREWALL_NOTE
-Logs:    docker compose -f deploy/docker-compose.yml logs -f <$LOG_SERVICES>
-Update:  $UPDATE_CMD
-SUMMARY
+Voice/video and notifications are already set up for every space created here — nothing to
+configure in the app.
+
+$SIGNUP_NOTE
+
+Managing it (from anywhere on this server):
+  purrlor status          what's running, and whether it's healthy
+  purrlor logs [service]  follow the logs (web, token-server, push-gateway, livekit, matrix)
+  purrlor update          get the latest Purrlor and restart onto it
+  purrlor backup          save .env and the homeserver's data to a file
+  purrlor doctor          re-run the outside-in checks above
+
+Installed in: $REPO_ROOT   (settings: $REPO_ROOT/.env)"
+
+# Kept for later — `purrlor info` prints it again. Mode 600: it holds the sign-up code.
+printf '%s\n' "$SUMMARY_TEXT" > "$REPO_ROOT/.install-summary"
+chmod 600 "$REPO_ROOT/.install-summary"
+
+# The `purrlor` management command.
+ln -sf "$REPO_ROOT/deploy/purrlor" /usr/local/bin/purrlor
+chmod +x "$REPO_ROOT/deploy/purrlor"
+
+printf '%s\n' "$FAIL_NOTE"
+printf '\n============================================================================\n\n'
+printf '%s\n' "$SUMMARY_TEXT"
+printf '\n(This summary is saved — see it again any time with: purrlor info)\n'

@@ -30,6 +30,8 @@ import type { VoiceServerConfig } from '../../matrix/voice';
 import { autoJoinSpaceChannels } from '../../matrix/autoJoin';
 import { joinPublicRoom } from '../../matrix/directory';
 import { canSendStateEvent } from '../../matrix/permissions';
+import { isDemoMode } from '../../demo/demoMode';
+import { adoptDefaultVoiceServer } from '../../matrix/deploymentDefaults';
 import { addVoiceHints, removeRoomFromSpace, reorderSpaceChildren } from '../../matrix/spaceChildren';
 import { useVoiceCall } from '../voice/voiceCallContext';
 import { UserPanel } from '../account/UserPanel';
@@ -397,6 +399,8 @@ function useCollapsedCategories(spaceId: string | null): [Set<string>, (category
 
 /** Spaces whose voice links this session has already checked (see the effect in ChannelList). */
 const voiceHintedSpaces = new Set<string>();
+/** Spaces already offered this deployment's voice server this session (deploymentDefaults.ts). */
+const voiceDefaultedSpaces = new Set<string>();
 
 /**
  * Second column. Two modes, toggled by the server rail's pinned Home/DM icon
@@ -451,6 +455,14 @@ export function ChannelList() {
     voiceHintedSpaces.add(space.roomId);
     addVoiceHints(mx, space, spaceRooms).catch(() => voiceHintedSpaces.delete(space.roomId));
   }, [mx, space, canLinkChannels, spaceRooms]);
+
+  // A Space on a fresh install gets this deployment's voice server the first time an admin opens
+  // it, so voice channels just work — nobody has to find and paste the LiveKit URLs.
+  useEffect(() => {
+    if (!space || isDemoMode() || voiceDefaultedSpaces.has(space.roomId)) return;
+    voiceDefaultedSpaces.add(space.roomId);
+    adoptDefaultVoiceServer(mx, space).catch(() => voiceDefaultedSpaces.delete(space.roomId));
+  }, [mx, space]);
 
   // A channel belongs to at most one category (Discord's own model) — anything not listed in
   // any category's channelIds renders flat, above the categories, exactly like every Space

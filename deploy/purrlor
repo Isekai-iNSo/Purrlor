@@ -1,0 +1,211 @@
+#!/usr/bin/env bash
+# `purrlor` — day-to-day management of a Purrlor install. deploy/setup.sh links this into
+# /usr/local/bin, so it works from anywhere on the server. Run `purrlor help` for the commands.
+#
+# Everything here is a thin, readable wrapper around docker compose and .env — nothing it does is
+# hidden; each command says what it's running.
+
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+cd "$REPO_ROOT"
+
+say()  { printf '==> %s\n' "$1"; }
+warn() { printf '!!  %s\n' "$1" >&2; }
+die()  { warn "$1"; exit 1; }
+
+[ -f .env ] || die "No .env in $REPO_ROOT — Purrlor isn't installed here yet. Run: sudo bash deploy/setup.sh"
+
+env_get() { grep "^$1=" .env 2>/dev/null | tail -n1 | cut -d= -f2- || true; }
+
+# Same as setup.sh's: replace the line for KEY instead of appending a second one.
+env_set() {
+  local __tmp
+  __tmp="$(mktemp)"
+  grep -v "^$1=" .env > "$__tmp" || true
+  printf '%s=%s\n' "$1" "$2" >> "$__tmp"
+  cat "$__tmp" > .env
+  rm -f "$__tmp"
+  chmod 600 .env
+}
+
+has_matrix() { [ "$(env_get COMPOSE_PROFILES)" = matrix ]; }
+
+compose() {
+  local __profile=()
+  if has_matrix; then __profile=(--profile matrix); fi
+  docker compose -f deploy/docker-compose.yml --env-file .env "${__profile[@]}" "$@"
+}
+
+need_root() {
+  [ "$(id -u)" -eq 0 ] || die "This one needs root: sudo purrlor $*"
+}
+
+host_of() { printf '%s' "$1" | sed -E 's#^[a-z]+://##; s#[:/].*$##'; }
+
+cmd_help() {
+  cat <<'HELP'
+purrlor — manage this Purrlor install
+
+  purrlor info               the install summary: address, how to log in, the sign-up code
+  purrlor status             what's running, and whether each part answers
+  purrlor logs [service]     follow logs (web, token-server, push-gateway, livekit, matrix)
+  purrlor restart [service]  restart everything, or one service
+  purrlor update             pull the latest Purrlor and restart onto it
+  purrlor doctor             check everything from the outside, the way a browser would
+  purrlor backup [dir]       save .env and the homeserver's data (default dir: ./backups)
+
+Sign-ups (bundled homeserver only):
+  purrlor new-invite-code    replace the sign-up code (the old one stops working)
+  purrlor open-signups       allow sign-up with the sign-up code
+  purrlor close-signups      no new sign-ups at all (the admin can still create accounts)
+HELP
+}
+
+cmd_info() {
+  if [ -f .install-summary ]; then cat .install-summary; else warn "No saved summary — this install predates it. Settings are in $REPO_ROOT/.env."; fi
+}
+
+cmd_status() {
+  compose ps
+  echo
+  local ok=0
+  curl -fsS -m 5 http://127.0.0.1:8080/ >/dev/null 2>&1 && echo "  ok   web" || { echo "  FAIL web"; ok=1; }
+  curl -fsS -m 5 http://127.0.0.1:3001/health >/dev/null 2>&1 && echo "  ok   token-server" || { echo "  FAIL token-server"; ok=1; }
+  curl -fsS -m 5 http://127.0.0.1:3002/health >/dev/null 2>&1 && echo "  ok   push-gateway" || { echo "  FAIL push-gateway"; ok=1; }
+  curl -fsS -m 5 http://127.0.0.1:7880/ >/dev/null 2>&1 && echo "  ok   livekit" || { echo "  FAIL livekit"; ok=1; }
+  if has_matrix; then
+    curl -fsS -m 5 http://127.0.0.1:8008/_matrix/client/versions >/dev/null 2>&1 && echo "  ok   matrix" || { echo "  FAIL matrix"; ok=1; }
+  fi
+  [ "$ok" -eq 0 ] || echo "
+Something isn't answering — 'purrlor logs <service>' shows why."
+}
+
+cmd_doctor() {
+  local app livekit homeserver ip fails=0
+  app="$(host_of "$(env_get ALLOWED_ORIGINS | cut -d, -f1)")"
+  livekit="$(host_of "$(env_get PURRLOR_LIVEKIT_URL)")"
+  homeserver="$(env_get PURRLOR_HOMESERVER_URL)"
+  ip="$(env_get HOST_IP)"
+  [ -n "$app" ] && [ -n "$ip" ] || die ".env is missing ALLOWED_ORIGINS or HOST_IP — re-run setup.sh."
+
+  check() {
+    local label="$1"; shift
+    if "$@" >/dev/null 2>&1; then echo "  ok   $label"; else echo "  FAIL $label"; fails=$((fails + 1)); fi
+  }
+  get() { curl -fsS -m 10 --noproxy '*' --resolve "$1:443:$ip" "https://$1$2"; }
+  has() { local b; b="$(get "$1" "$2")" && grep -q -- "$3" <<<"$b"; }
+  dns() { [ "$(getent ahostsv4 "$1" 2>/dev/null | awk '{print $1}' | head -n1)" = "$ip" ]; }
+
+  say "DNS (should all point at $ip)"
+  check "$app" dns "$app"
+  [ -n "$livekit" ] && check "$livekit" dns "$livekit"
+  [ -n "$homeserver" ] && check "$(host_of "$homeserver")" dns "$(host_of "$homeserver")"
+
+  say "HTTPS"
+  check "app at https://$app" get "$app" /
+  check "token server (https://$app/api/livekit)" has "$app" /api/livekit/config botUserId
+  check "push gateway (https://$app/api/push)" has "$app" /api/push/health ok
+  [ -n "$livekit" ] && check "voice server at https://$livekit" get "$livekit" /
+  if [ -n "$homeserver" ]; then
+    check "homeserver at $homeserver" has "$(host_of "$homeserver")" /_matrix/client/versions versions
+  fi
+  if has_matrix && [ -n "$homeserver" ]; then
+    local mhost; mhost="$(host_of "$homeserver")"
+    check "federation (port 8448)" curl -fsS -m 10 --noproxy '*' --resolve "$mhost:8448:$ip" "https://$mhost:8448/_matrix/federation/v1/version"
+  fi
+
+  say "Certificate"
+  local days
+  days="$(echo | openssl s_client -connect "$ip:443" -servername "$app" 2>/dev/null | openssl x509 -noout -enddate 2>/dev/null | cut -d= -f2)"
+  if [ -n "$days" ]; then echo "  ok   valid until $days (renews automatically)"; else echo "  FAIL couldn't read the certificate"; fails=$((fails + 1)); fi
+
+  echo
+  if [ "$fails" -eq 0 ]; then
+    echo "Everything answers from the outside."
+  else
+    cat <<ADVICE
+$fails check(s) failed. The usual causes:
+  - DNS: a record isn't pointing at $ip yet (or a Cloudflare record is proxied — use DNS only).
+  - Firewall: your provider's firewall is blocking 80/443 (or 8448 for federation).
+  - A service is down: 'purrlor status', then 'purrlor logs <service>'.
+Voice needs 7881/tcp and 7882/udp open too; those can't be tested from here.
+ADVICE
+  fi
+}
+
+cmd_update() {
+  need_root update
+  say "Fetching the latest Purrlor"
+  git pull --ff-only || die "git pull couldn't fast-forward — there are local changes in $REPO_ROOT. Check 'git status'."
+  say "Rebuilding and restarting (only what changed is rebuilt)"
+  compose up -d --build
+  say "Removing images the update left behind"
+  docker image prune -f >/dev/null
+  echo
+  cmd_status
+}
+
+cmd_backup() {
+  need_root backup
+  local dir="${1:-$REPO_ROOT/backups}" stamp file
+  stamp="$(date +%Y%m%d-%H%M%S)"
+  mkdir -p "$dir"
+  file="$dir/purrlor-$stamp.tar.gz"
+  local work; work="$(mktemp -d)"
+  cp .env "$work/env"
+  if has_matrix; then
+    # The homeserver's database is only consistent while it isn't writing — a minute of downtime.
+    say "Stopping the homeserver briefly for a consistent copy"
+    compose stop matrix
+    local cid; cid="$(compose ps -a -q matrix)"
+    docker run --rm --volumes-from "$cid" -v "$work:/backup" alpine \
+      tar -czf /backup/matrix-db.tar.gz -C /var/lib/continuwuity .
+    compose start matrix
+  fi
+  tar -czf "$file" -C "$work" .
+  rm -rf "$work"
+  chmod 600 "$file"
+  say "Saved $file"
+  echo "   It contains your secrets (.env) — keep it somewhere safe, and off this server too."
+}
+
+matrix_only() { has_matrix || die "This install uses its own homeserver's sign-up settings, not Purrlor's bundled one."; }
+
+cmd_new_invite_code() {
+  need_root new-invite-code; matrix_only
+  local token; token="$(openssl rand -hex 16)"
+  env_set MATRIX_REGISTRATION_TOKEN "$token"
+  compose up -d matrix
+  sed -i "s/^    [0-9a-f]\{32,64\}$/    $token/" .install-summary 2>/dev/null || true
+  say "New sign-up code (the old one no longer works):"
+  echo "    $token"
+}
+
+cmd_signups() {
+  need_root "$1-signups"; matrix_only
+  if [ "$1" = open ]; then
+    env_set MATRIX_ALLOW_REGISTRATION true
+    compose up -d matrix
+    say "Sign-up is open to anyone with the sign-up code: $(env_get MATRIX_REGISTRATION_TOKEN)"
+  else
+    env_set MATRIX_ALLOW_REGISTRATION false
+    compose up -d matrix
+    say "Sign-up is closed. Create accounts from the admin room: !admin users create-user <name>"
+  fi
+}
+
+case "${1:-help}" in
+  help|-h|--help) cmd_help ;;
+  info) cmd_info ;;
+  status) cmd_status ;;
+  logs) shift; compose logs -f --tail 200 "$@" ;;
+  restart) shift; compose restart "$@" ;;
+  update) cmd_update ;;
+  doctor) cmd_doctor ;;
+  backup) shift; cmd_backup "$@" ;;
+  new-invite-code) cmd_new_invite_code ;;
+  open-signups) cmd_signups open ;;
+  close-signups) cmd_signups close ;;
+  *) warn "Unknown command: $1"; echo; cmd_help; exit 1 ;;
+esac

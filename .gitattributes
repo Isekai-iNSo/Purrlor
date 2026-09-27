@@ -1,3 +1,5 @@
 # Shell scripts run on Linux (the server, and inside the web image via nginx's entrypoint), where a
 # CRLF line ending breaks them. Keep them LF in every checkout, whatever core.autocrlf says.
 *.sh text eol=lf
+# The `purrlor` management command has no extension, but is a shell script all the same.
+deploy/purrlor text eol=lf

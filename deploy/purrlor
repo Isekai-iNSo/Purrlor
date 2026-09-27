@@ -51,7 +51,7 @@ purrlor — manage this Purrlor install
   purrlor status             what's running, and whether each part answers
   purrlor logs [service]     follow logs (web, token-server, push-gateway, livekit, matrix)
   purrlor restart [service]  restart everything, or one service
-  purrlor update             pull the latest Purrlor and restart onto it
+  purrlor update             get the latest Purrlor and restart onto it
   purrlor doctor             check everything from the outside, the way a browser would
   purrlor backup [dir]       save .env and the homeserver's data (default dir: ./backups)
 
@@ -138,8 +138,13 @@ cmd_update() {
   need_root update
   say "Fetching the latest Purrlor"
   git pull --ff-only || die "git pull couldn't fast-forward — there are local changes in $REPO_ROOT. Check 'git status'."
-  say "Rebuilding and restarting (only what changed is rebuilt)"
-  compose up -d --build
+  say "Downloading the new images and restarting onto them"
+  if compose pull; then
+    compose up -d
+  else
+    warn "Couldn't download the prebuilt images — building them here instead (needs ~4 GB of memory)."
+    compose up -d --build
+  fi
   say "Removing images the update left behind"
   docker image prune -f >/dev/null
   echo

@@ -1,6 +1,6 @@
 # Builds and runs the Matrix-membership-gated LiveKit token server (docs/voice-architecture.md).
 
-FROM node:22-alpine AS builder
+FROM --platform=$BUILDPLATFORM node:22-alpine AS builder
 WORKDIR /src
 
 COPY services/token-server/package.json services/token-server/package-lock.json ./

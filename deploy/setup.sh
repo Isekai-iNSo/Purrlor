@@ -230,36 +230,53 @@ fi
 
 log "Checking this server"
 
-# Building the web client needs ~3-4 GB of memory at its peak, and a small VPS without swap gets
-# the build killed part-way with nothing more helpful than "exit code 137". Swap turns that into a
-# slower build instead of a failed one — and the running stack itself is happy on 1-2 GB.
+# Purrlor's images come prebuilt (.github/workflows/images.yml), so the server only has to *run*
+# them: the homeserver, the voice server, two small Node services and nginx — about 1 GB in
+# practice. Building them here instead (only if the download fails) needs ~4 GB, which is checked
+# at that point, not now.
 MEM_MB="$(awk '/^MemTotal:/ {print int($2/1024)}' /proc/meminfo)"
 SWAP_MB="$(awk '/^SwapTotal:/ {print int($2/1024)}' /proc/meminfo)"
 echo "  memory: ${MEM_MB} MB RAM, ${SWAP_MB} MB swap"
-if [ $((MEM_MB + SWAP_MB)) -lt 3800 ]; then
-  if [ -f /swapfile ]; then
-    warn "Less than 4 GB of memory+swap, and /swapfile already exists (not active?). The build may run
-    out of memory — enable more swap by hand if it fails."
-  else
-    SWAP_TO_ADD=$((4096 - MEM_MB - SWAP_MB))
-    [ "$SWAP_TO_ADD" -lt 1024 ] && SWAP_TO_ADD=1024
-    echo "  Building Purrlor needs about 4 GB of memory; this server has less. Adding a ${SWAP_TO_ADD} MB"
-    echo "  swap file fixes that (it's only really used while building)."
-    if confirm "Add a ${SWAP_TO_ADD} MB swap file at /swapfile?" y; then
-      fallocate -l "${SWAP_TO_ADD}M" /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count="$SWAP_TO_ADD" status=none
-      chmod 600 /swapfile
-      mkswap /swapfile >/dev/null
-      swapon /swapfile
+
+# A container (LXC, OpenVZ/Virtuozzo, Docker) rather than a real VM: swap can't be added, and
+# Docker itself often can't run inside one unless the host allows nesting.
+IN_CONTAINER=""
+if [ -e /proc/vz ] && [ ! -e /proc/bc ]; then IN_CONTAINER="OpenVZ/Virtuozzo"
+elif grep -qa 'container=lxc' /proc/1/environ 2>/dev/null; then IN_CONTAINER="LXC"
+elif [ -e /.dockerenv ] || [ -e /run/.containerenv ]; then IN_CONTAINER="Docker/Podman"
+fi
+if [ -n "$IN_CONTAINER" ]; then
+  echo "  note: this looks like a $IN_CONTAINER container rather than a full virtual machine."
+fi
+
+if [ $((MEM_MB + SWAP_MB)) -lt 900 ]; then
+  warn "This server has ${MEM_MB} MB of RAM. Purrlor needs about 1 GB to run (its homeserver, voice
+    server and web services together) — on less, parts of it get killed for lack of memory.
+    A 1 GB VPS is the minimum; 2 GB is comfortable."
+  confirm "Try anyway?" n || die "Re-run on a server with at least 1 GB of RAM."
+fi
+
+# Swap as a cushion on smaller servers: not needed to run, but it turns a memory spike into a
+# brief slowdown instead of a killed process.
+if [ $((MEM_MB + SWAP_MB)) -lt 2000 ] && [ ! -f /swapfile ]; then
+  SWAP_TO_ADD=$((2048 - SWAP_MB))
+  echo "  A little swap gives a small server room for memory spikes."
+  if confirm "Add a ${SWAP_TO_ADD} MB swap file at /swapfile?" y; then
+    if { fallocate -l "${SWAP_TO_ADD}M" /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count="$SWAP_TO_ADD" 2>/dev/null; } \
+      && chmod 600 /swapfile && mkswap /swapfile >/dev/null 2>&1 && swapon /swapfile 2>/dev/null; then
       grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
       # systemd mounts fstab swap by itself; OpenRC only with its swap service in the boot runlevel.
       if [ "$INIT" = openrc ]; then rc-update add swap boot >/dev/null 2>&1 || true; fi
+      SWAP_MB=$((SWAP_MB + SWAP_TO_ADD))
       echo "  ok   swap added (and kept across reboots)"
     else
-      warn "Continuing without swap — if the build fails with exit code 137, re-run and say yes."
+      rm -f /swapfile
+      warn "This server doesn't allow adding swap${IN_CONTAINER:+ (normal for a $IN_CONTAINER container)}.
+    Continuing without it — fine as long as there's enough RAM."
     fi
   fi
 else
-  echo "  ok   enough memory to build"
+  echo "  ok   enough memory"
 fi
 
 DISK_FREE_GB="$(df -Pk "$REPO_ROOT" | awk 'NR==2 {print int($4/1048576)}')"
@@ -1154,7 +1171,8 @@ if [ "$PROVISION_MATRIX" = true ]; then
   COMPOSE_PROFILE_ARGS=(--profile matrix)
 
   log "Starting the new homeserver first (its accounts need to exist before the rest of the stack can use them)"
-  docker compose -f deploy/docker-compose.yml --env-file .env "${COMPOSE_PROFILE_ARGS[@]}" up -d --build matrix
+  # The homeserver is an upstream image — nothing of ours to build.
+  docker compose -f deploy/docker-compose.yml --env-file .env "${COMPOSE_PROFILE_ARGS[@]}" up -d matrix
 
   log "Waiting for it to come up"
   MATRIX_UP=false
@@ -1227,8 +1245,21 @@ if [ "$PROVISION_MATRIX" = true ]; then
   echo "  ok   .env updated"
 fi
 
-log "Building and starting the rest of the Purrlor stack (this can take a few minutes the first time)"
-docker compose -f deploy/docker-compose.yml --env-file .env "${COMPOSE_PROFILE_ARGS[@]}" up -d --build
+log "Downloading and starting the rest of the Purrlor stack"
+# Prebuilt images first (built by CI for amd64 and arm64 — seconds to download, no memory needed).
+# Only if that fails (no internet to the registry, an unusual CPU) is it built here, which needs
+# ~4 GB of memory: checked first, so a small server gets a clear message instead of a build killed
+# halfway with "exit code 137".
+if docker compose -f deploy/docker-compose.yml --env-file .env "${COMPOSE_PROFILE_ARGS[@]}" pull; then
+  docker compose -f deploy/docker-compose.yml --env-file .env "${COMPOSE_PROFILE_ARGS[@]}" up -d
+else
+  warn "Couldn't download the prebuilt images — building them on this server instead."
+  if [ $((MEM_MB + SWAP_MB)) -lt 3800 ]; then
+    die "Building here needs about 4 GB of memory (RAM + swap) and this server has $((MEM_MB + SWAP_MB)) MB.
+    Check this server can reach ghcr.io (the image registry), then re-run: sudo bash deploy/setup.sh"
+  fi
+  docker compose -f deploy/docker-compose.yml --env-file .env "${COMPOSE_PROFILE_ARGS[@]}" up -d --build
+fi
 
 log "Checking everything from the outside (the way a browser would)"
 

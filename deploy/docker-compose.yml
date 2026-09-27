@@ -6,14 +6,19 @@
 # homeserver) and it's ignored entirely. See docs/voice-architecture.md for how these services fit together, and
 # ../.env.example for the variables this file expects.
 #
-# Run from the repo root: docker compose -f deploy/docker-compose.yml --env-file .env up --build
+# Run from the repo root: docker compose -f deploy/docker-compose.yml --env-file .env pull
+#                    then: docker compose -f deploy/docker-compose.yml --env-file .env up -d
 #
-# token-server, push-gateway, and web each carry an explicit `image:` tag alongside their
-# `build:` block — normally cosmetic (compose names an on-the-fly build the same thing anyway),
-# but it also means a `docker load` of a tarball built ELSEWHERE under that same tag is picked up
-# by a plain `docker compose up -d` here with no rebuild — useful when this host can't/shouldn't
-# build from source itself (e.g. it has no dev toolchain, or building here is undesirably slow).
-# See deploy/update-from-mount.sh for a working example of that flow.
+# token-server, push-gateway, and web are prebuilt by CI (.github/workflows/images.yml) for amd64
+# and arm64 and published to GitHub's registry, so a server downloads them instead of building —
+# building the web client needs ~4 GB of memory, far more than running it. Each keeps its `build:`
+# block too, so `up --build` still builds from this checkout (a fork, a local change, a registry
+# this host can't reach).
+#
+# PURRLOR_IMAGE_PREFIX / PURRLOR_IMAGE_TAG (optional) choose which images: the default is
+# ghcr.io/m0nnnna/purrlor-<service>:latest. PURRLOR_IMAGE_TAG can pin a commit (sha-<first 7>).
+# Setting PURRLOR_IMAGE_PREFIX to empty uses plain local names (purrlor-web:latest, …) — what a
+# `docker load` of images built elsewhere provides (see deploy/update-from-mount.sh).
 #
 # BIND_ADDR (optional, defaults to 127.0.0.1): the address the four reverse-proxied ports below
 # bind to on the host. The default assumes nginx runs on this SAME host (the common case — see
@@ -67,7 +72,7 @@ services:
       - purrlor-voice
 
   token-server:
-    image: purrlor-token-server:latest
+    image: ${PURRLOR_IMAGE_PREFIX-ghcr.io/m0nnnna/}purrlor-token-server:${PURRLOR_IMAGE_TAG:-latest}
     build:
       context: ..
       dockerfile: services/token-server/Dockerfile
@@ -104,7 +109,7 @@ services:
       - purrlor-voice
 
   push-gateway:
-    image: purrlor-push-gateway:latest
+    image: ${PURRLOR_IMAGE_PREFIX-ghcr.io/m0nnnna/}purrlor-push-gateway:${PURRLOR_IMAGE_TAG:-latest}
     build:
       context: ..
       dockerfile: services/push-gateway/Dockerfile
@@ -129,7 +134,7 @@ services:
       - purrlor-voice
 
   web:
-    image: purrlor-web:latest
+    image: ${PURRLOR_IMAGE_PREFIX-ghcr.io/m0nnnna/}purrlor-web:${PURRLOR_IMAGE_TAG:-latest}
     build:
       context: ..
       dockerfile: apps/web/Dockerfile

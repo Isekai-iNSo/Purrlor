@@ -11,7 +11,7 @@
 # homeserver), is read at container START, not build time: deploy/40-purrlor-config.sh writes it
 # into /config.json, which the client fetches on load. Still one image for every deployment.
 
-FROM node:24-alpine AS builder
+FROM --platform=$BUILDPLATFORM node:24-alpine AS builder
 WORKDIR /src
 
 COPY apps/web/package.json apps/web/package-lock.json ./

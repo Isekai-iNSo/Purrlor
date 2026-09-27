@@ -1,7 +1,7 @@
 # Builds and runs the Web Push <-> Matrix Push Gateway API bridge (docs/voice-architecture.md's
 # sibling doc for push — see README.md's "Background push notifications" section).
 
-FROM node:22-alpine AS builder
+FROM --platform=$BUILDPLATFORM node:22-alpine AS builder
 WORKDIR /src
 
 COPY services/push-gateway/package.json services/push-gateway/package-lock.json ./

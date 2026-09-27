@@ -124,6 +124,9 @@ cmd_doctor() {
   status_hint() {
     case "$1" in
       000) echo "no answer at all (DNS, a firewall, or nothing listening on 443)" ;;
+      TIMEOUT) local b; b="$(env_get BIND_ADDR)"
+               echo "timed out — something took the request but never answered: usually nginx can't reach the Purrlor server${b:+ at $b} and is waiting on it" ;;
+      401) echo "asks for a login — this name reaches some other service, not Purrlor (an old server block?)" ;;
       301|302|307|308) echo "redirected (to ${2:-?}) — behind Cloudflare, usually SSL/TLS mode 'Flexible': set it to 'Full (strict)'" ;;
       400) echo "bad request — often a plain-HTTP port reached over HTTPS, or the reverse" ;;
       403) echo "forbidden — a Cloudflare security rule or an nginx allow/deny" ;;
@@ -144,9 +147,12 @@ cmd_doctor() {
     [ "$edge" = true ] || args+=(--resolve "$host:443:$ip")
     # A variable, not `read`: curl's -w output has no newline, and read's non-zero exit at the end
     # of input would end the script under set -e.
-    local out; out="$(curl "${args[@]}" "https://$host$path" 2>/dev/null || true)"
+    local out rc=0
+    out="$(curl "${args[@]}" "https://$host$path" 2>/dev/null)" || rc=$?
     code="${out%% *}"; loc="${out#* }"
     [ -n "$code" ] || code=000
+    # curl's exit 28 is its own timeout: reached, but no answer — a different problem from refused.
+    if [ "$code" = 000 ] && [ "$rc" = 28 ]; then code=TIMEOUT; fi
     if [ "${code:0:1}" = 2 ] && { [ -z "$want" ] || grep -q -- "$want" "$body"; }; then
       echo "  ok   $label"
     else

@@ -206,6 +206,10 @@ services:
       CONTINUWUITY_ALLOW_REGISTRATION: ${MATRIX_ALLOW_REGISTRATION:-true}
       CONTINUWUITY_REGISTRATION_TOKEN: ${MATRIX_REGISTRATION_TOKEN}
       CONTINUWUITY_ALLOW_FEDERATION: 'true'
+      # Continuwuity appends a suffix (a flag emoji, by default) to the display name of every new
+      # account. Off here, so names come out exactly as people type them; set
+      # MATRIX_NEW_USER_DISPLAYNAME_SUFFIX in .env to bring one back.
+      CONTINUWUITY_NEW_USER_DISPLAYNAME_SUFFIX: ${MATRIX_NEW_USER_DISPLAYNAME_SUFFIX:-}
       # Continuwuity's HTTP client honors the standard variables (verified against a logging proxy:
       # federation lookups arrive as CONNECTs).
       HTTP_PROXY: ${CONTAINER_PROXY:-${OUTBOUND_PROXY:-}}

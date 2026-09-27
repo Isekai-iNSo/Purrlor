@@ -154,6 +154,18 @@ cmd_doctor() {
   echo
   if [ "$fails" -eq 0 ]; then
     echo "Everything answers from the outside."
+  elif [ "$edge" = true ]; then
+    local bind; bind="$(env_get BIND_ADDR)"
+    cat <<ADVICE
+$fails check(s) failed. With nginx on another server, that's almost always its config:
+  - The page loads but /api/livekit or /api/push fail: the app's server block is missing the
+    'location /api/livekit/' and 'location /api/push/' blocks.
+  - A whole name fails (livekit., matrix.): nginx has no server block for it, or it points
+    somewhere other than $bind.
+The complete config for your nginx server is in $REPO_ROOT/deploy/edge/purrlor.conf (and the
+voice relay in purrlor-stream.conf) — compare it with what's there, or use it in place of the old
+files. From the nginx server, 'curl http://$bind:3001/health' shows it can reach this one.
+ADVICE
   else
     cat <<ADVICE
 $fails check(s) failed. The usual causes:

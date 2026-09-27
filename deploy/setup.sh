@@ -1358,15 +1358,25 @@ if [ -e /etc/nginx/sites-enabled/nekous.conf ] || [ -e /etc/nginx/sites-availabl
 fi
 
 if [ "$EDGE_MODE" = true ]; then
-  # LiveKit's media ports aren't HTTP; the edge relays them with nginx's stream module.
-  cat > "$REPO_ROOT/deploy/edge/purrlor-stream.conf" <<STREAM_EOF
+  # LiveKit's media ports aren't HTTP; the edge can relay them with nginx's stream module. Named
+  # .stream, not .conf, so it can't be swept up by a sites-enabled/*.conf or conf.d/*.conf include:
+  # in the http {} context its proxy_pass is an error that makes nginx refuse the whole reload.
+  rm -f "$REPO_ROOT/deploy/edge/purrlor-stream.conf"
+  cat > "$REPO_ROOT/deploy/edge/voice-relay.stream" <<STREAM_EOF
+# OPTIONAL — only if THIS nginx server is where ports 7881/7882 arrive from the internet. If
+# something else already forwards them to $UPSTREAM (a VPS, a router, NekoProxy), skip this file.
+#
+# NOT a site: never put it in sites-enabled/ or conf.d/ — nginx rejects the whole reload
+# ("proxy_pass directive is not allowed here") and keeps running its old config.
+#
 # Purrlor voice/video media, relayed to $UPSTREAM. These are server blocks for nginx's stream {}
 # context (a sibling of http {}, not inside it), which needs the stream module:
 #   Alpine:         apk add nginx-mod-stream, then copy this file to /etc/nginx/stream.d/purrlor.conf
+#                   (stream.d, not http.d)
 #                   (installing the module sets up a stream {} that loads everything in stream.d/)
-#   Debian/Ubuntu:  apt install libnginx-mod-stream, copy this file to /etc/nginx/purrlor-stream.conf,
+#   Debian/Ubuntu:  apt install libnginx-mod-stream, copy this file to /etc/nginx/purrlor.stream,
 #                   and add at the top level of /etc/nginx/nginx.conf (outside http {}):
-#                     stream { include /etc/nginx/purrlor-stream.conf; }
+#                     stream { include /etc/nginx/purrlor.stream; }
 #                   or, if nginx.conf already has a stream {} block, put just the include inside it.
 server {
     listen 7881;
@@ -1377,7 +1387,7 @@ server {
     proxy_pass $UPSTREAM:7882;
 }
 STREAM_EOF
-  echo "  ok   wrote deploy/edge/purrlor.conf and deploy/edge/purrlor-stream.conf for your nginx server"
+  echo "  ok   wrote deploy/edge/purrlor.conf (and the optional voice-relay.stream) for your nginx server"
 else
 # nginx 1.25.1 moved HTTP/2 from a listen flag to its own directive and warns about the old form
 # (Alpine ships the new one); older versions (Debian 12's 1.22) don't know the new directive at all.
@@ -1610,19 +1620,20 @@ fi
 
 EDGE_NOTE=""
 if [ "$EDGE_MODE" = true ]; then
-  EDGE_NOTE="Your nginx server: two files to add (they're in $REPO_ROOT/deploy/edge/):
+  EDGE_NOTE="Your nginx server: the config to add is in $REPO_ROOT/deploy/edge/:
 
   purrlor.conf         the sites — into its http {} config (e.g. /etc/nginx/conf.d/ or http.d/).
                        It expects a certificate at /etc/letsencrypt/live/$APP_DOMAIN/ covering:
                          ${DNS_CHECK_DOMAINS[*]}
                        Get one there with:  certbot certonly --nginx --cert-name $APP_DOMAIN $(printf -- '-d %s ' "${DNS_CHECK_DOMAINS[@]}")
                        (or change the ssl_certificate lines to where your certificates already are)
-  purrlor-stream.conf  voice/video media relay — Alpine: into /etc/nginx/stream.d/ (after
-                       apk add nginx-mod-stream); Debian/Ubuntu: see the note at the top of the file
+  voice-relay.stream   OPTIONAL: only if the nginx server is where ports 7881/7882 arrive; skip it
+                       if something else (a VPS, NekoProxy, your router) forwards them to $LOCAL_ADDR.
+                       Never in sites-enabled/ or conf.d/ — see the note at the top of the file.
 
-Then 'nginx -t && nginx -s reload' there, open 7881/tcp and 7882/udp on it (and 8448/tcp for
-federation), make sure it can reach $LOCAL_ADDR on 8080, 3001, 3002, 7880 and 8008, and run
-'purrlor doctor' here to check it all from the outside."
+Then run 'nginx -t' there and read what it says: if it reports an error, 'nginx -s reload' is
+refused and nginx carries on with its OLD config. Make sure it can reach $LOCAL_ADDR on 8080,
+3001, 3002, 7880 and 8008, and run 'purrlor doctor' here to check it all from the outside."
 fi
 
 FAIL_NOTE=""

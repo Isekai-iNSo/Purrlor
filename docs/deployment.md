@@ -438,7 +438,9 @@ already run". It then skips nginx and certificates on this server, asks for this
 address (offering its WireGuard/LAN addresses) and sets `BIND_ADDR` and `PURRLOR_EDGE=true`,
 accepts DNS records that point at the edge (or at Cloudflare), and writes two files for the edge
 box into `deploy/edge/`: `purrlor.conf` (the sites, proxying to the private address) and
-`purrlor-stream.conf` (the voice/video relay), with where each goes. `purrlor doctor` then checks
+the optional `voice-relay.stream` (the voice/video relay, only when the edge box itself receives
+ports 7881/7882 — named `.stream` so no `*.conf` include picks it up, which would make nginx refuse
+the whole reload), with where each goes. `purrlor doctor` then checks
 through the edge. The rest of this section is what that amounts to, by hand.
 
 Everything above assumes nginx and the docker-compose stack run on the same box. A common

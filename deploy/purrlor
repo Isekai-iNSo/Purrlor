@@ -214,8 +214,9 @@ $fails check(s) failed. With nginx on another server, that's almost always its c
   - A whole name fails (livekit., matrix.): nginx has no server block for it, or it points
     somewhere other than $bind.
 The complete config for your nginx server is in $REPO_ROOT/deploy/edge/purrlor.conf (and the
-voice relay in purrlor-stream.conf) — compare it with what's there, or use it in place of the old
-files. From the nginx server, 'curl http://$bind:3001/health' shows it can reach this one.
+optional voice relay in voice-relay.stream) — compare it with what's there, or use it in place of the old
+files. On the nginx server, 'nginx -t' must pass: with an error, a reload is refused and the old
+config stays live. 'curl http://$bind:3001/health' there shows it can reach this server.
 ADVICE
   else
     cat <<ADVICE

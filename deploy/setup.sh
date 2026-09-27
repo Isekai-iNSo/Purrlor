@@ -382,10 +382,24 @@ if confirm "Does this server need an outbound proxy to reach the internet?" n; t
     login it wants (user:password@host:port), or it isn't an HTTP(S) forward proxy (NekoProxy: the
     agent's Forward proxy port, not a reverse-proxy port)."
     else
-      WHY="This server can't open a connection to $PROXY_HOST:$PROXY_PORT at all (a timeout means something
-    drops it). Check the proxy is running on that address and port, that this server can reach
-    that network ('ip route get $PROXY_HOST' should go out the WireGuard interface for a 10.x
-    address), and that the proxy host's firewall allows this server (NekoProxy: its firewall rules)."
+      # How this server would reach it: through a WireGuard/VPN interface, or just handed to the
+      # LAN's default gateway — which, for a private address, usually means nowhere.
+      ROUTE="$(ip route get "$PROXY_HOST" 2>/dev/null | head -n1)"
+      ROUTE_DEV="$(printf '%s' "$ROUTE" | sed -n 's/.* dev \([^ ]*\).*/\1/p')"
+      ROUTE_VIA="$(printf '%s' "$ROUTE" | sed -n 's/.* via \([^ ]*\).*/\1/p')"
+      if [ -n "$ROUTE_VIA" ] && ! printf '%s' "$ROUTE_DEV" | grep -Eq '^(wg|tun|tap|tailscale|zt|nb)'; then
+        WHY="This server has no route of its own to $PROXY_HOST: it hands it to the gateway $ROUTE_VIA on
+    $ROUTE_DEV like any internet address, not to a WireGuard interface — this server isn't on that
+    private network. Either make it a peer of that WireGuard network; or give it a route there
+    (e.g. on the router: $PROXY_HOST's network via the LAN address of a machine that is on it) and
+    let that proxy accept this server (NekoProxy only admits its forward-proxy port on the
+    WireGuard interface); or run a proxy this server can reach (a NekoProxy internal agent on
+    this server, routed via your VPS agent, then use http://localhost:<its port>)."
+      else
+        WHY="This server can't open a connection to $PROXY_HOST:$PROXY_PORT at all (a timeout means something
+    drops it; the route is: ${ROUTE:-none}). Check the proxy is running on that address and port,
+    and that the proxy host's firewall allows this server (NekoProxy: its firewall rules)."
+      fi
     fi
     warn "The proxy test failed: $(tr '\n' ' ' < "$PROXY_ERR")
     $WHY"

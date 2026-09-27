@@ -1267,6 +1267,14 @@ server {
     # Matrix media uploads typically need.
     client_max_body_size 20M;
 
+    # Tells other homeservers to federate over 443 rather than 8448. Without it, a server named
+    # $MATRIX_DOMAIN is only reachable for federation on 8448 — which Cloudflare's proxy doesn't
+    # carry, and an edge box may not forward.
+    location = /.well-known/matrix/server {
+        default_type application/json;
+        return 200 '{"m.server": "$MATRIX_DOMAIN:443"}';
+    }
+
     location / {
         proxy_pass http://$UPSTREAM:8008;
         proxy_set_header Host \$host;

@@ -282,11 +282,27 @@ async function checkMembershipOverApi(
   }
   if (memberContent?.membership !== 'join') return { status: 'not-a-member' };
 
-  const powerLevels = await mx
-    .getStateEvent(roomId, 'm.room.power_levels', '')
-    .catch(() => ({}) as PowerLevelsContent);
-  const content = (powerLevels ?? {}) as PowerLevelsContent;
+  // The full state rather than just the power levels: on room version 12 the creator outranks
+  // everyone without being listed there, and only the create event's sender says who that is.
+  const state = ((await mx.roomState(roomId).catch(() => [])) ?? []) as RawStateEvent[];
+  const find = (type: string) => state.find((event) => event.type === type && event.state_key === '');
+  if (isPrivilegedCreator(find('m.room.create'), userId)) return { status: 'ok', powerLevel: Infinity };
+  const content = (find('m.room.power_levels')?.content ?? {}) as PowerLevelsContent;
   return { status: 'ok', powerLevel: content.users?.[userId] ?? content.users_default ?? 0 };
+}
+
+type RawStateEvent = { type?: string; state_key?: string; sender?: string; content?: Record<string, unknown> };
+
+/**
+ * Room version 12 gives a room's creators — the create event's sender, plus any
+ * `additional_creators` — unlimited power without listing them in the power levels (the spec
+ * forbids it). The SDK's RoomMember.powerLevel already reflects that; a raw read must too.
+ */
+export function isPrivilegedCreator(create: RawStateEvent | undefined, userId: string): boolean {
+  const version = create?.content?.room_version;
+  if (typeof version !== 'string' || !(version === '12' || version.startsWith('org.matrix.hydra'))) return false;
+  const extra = create?.content?.additional_creators;
+  return create?.sender === userId || (Array.isArray(extra) && extra.includes(userId));
 }
 
 /**

@@ -130,3 +130,42 @@ describe('canMentionRoom', () => {
     expect(canMentionRoom(room, '@member:example.org')).toBe(false);
   });
 });
+
+describe('room version 12 creators', () => {
+  // A v12 room: the creator is deliberately absent from power_levels.users, as the spec requires.
+  function v12Room(content: PowerLevelsContent, roomVersion = '12', additionalCreators: string[] = []) {
+    return {
+      currentState: {
+        getStateEvents: (type: string) =>
+          type === 'm.room.create'
+            ? {
+                getContent: () => ({ room_version: roomVersion, additional_creators: additionalCreators }),
+                getSender: () => '@creator:x',
+              }
+            : { getContent: () => content },
+      },
+    } as unknown as Parameters<typeof canSendStateEvent>[0];
+  }
+  const levels = { users: { '@mod:x': 50 }, state_default: 50, kick: 50, ban: 50 };
+
+  it('gives the creator full control though they are not listed in the power levels', () => {
+    const room = v12Room(levels);
+    expect(canSendStateEvent(room, '@creator:x', 'm.room.name')).toBe(true);
+    expect(canKickFromRoom(room, '@creator:x', 50)).toBe(true);
+    expect(canBanFromRoom(room, '@creator:x', 100)).toBe(true);
+    expect(canManageBans(room, '@creator:x')).toBe(true);
+    expect(canMentionRoom(room, '@creator:x')).toBe(true);
+  });
+
+  it('counts additional creators too, and nobody else', () => {
+    const room = v12Room(levels, '12', ['@co:x']);
+    expect(canSendStateEvent(room, '@co:x', 'm.room.name')).toBe(true);
+    expect(canSendStateEvent(room, '@member:x', 'm.room.name')).toBe(false);
+    expect(canKickFromRoom(room, '@mod:x', 0)).toBe(true);
+    expect(canKickFromRoom(room, '@mod:x', 50)).toBe(false);
+  });
+
+  it('leaves older room versions to the power levels alone', () => {
+    expect(canSendStateEvent(v12Room(levels, '10'), '@creator:x', 'm.room.name')).toBe(false);
+  });
+});

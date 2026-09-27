@@ -316,6 +316,9 @@ done
 DEFAULT_NO_PROXY="localhost,127.0.0.1,::1,livekit,token-server,push-gateway,web,matrix"
 OUTBOUND_PROXY=""
 OUTBOUND_NO_PROXY=""
+# What this host itself (apk/apt, Docker's image pulls, certbot renewal) sends through the proxy:
+# the proxy when "everything" goes through it, empty when only Purrlor's services use it.
+HOST_PROXY=""
 LOCAL_ADDR=127.0.0.1
 
 log "Outbound proxy"
@@ -353,28 +356,54 @@ if confirm "Does this server need an outbound proxy to reach the internet?" n; t
   OUTBOUND_NO_PROXY="$DEFAULT_NO_PROXY,host.docker.internal"
   if [ "$REPLY_VALUE" != "-" ]; then OUTBOUND_NO_PROXY="$OUTBOUND_NO_PROXY,$REPLY_VALUE"; fi
 
-  # This script's own curl/apk/apt/certbot/get.docker.com calls. Both spellings, since tools
-  # disagree about which one they read.
-  export http_proxy="$OUTBOUND_PROXY" https_proxy="$OUTBOUND_PROXY" no_proxy="$OUTBOUND_NO_PROXY"
-  export HTTP_PROXY="$OUTBOUND_PROXY" HTTPS_PROXY="$OUTBOUND_PROXY" NO_PROXY="$OUTBOUND_NO_PROXY"
+  # A server that also reaches the internet directly only needs the proxy for what it's *for* —
+  # keeping Purrlor's own outgoing traffic (federation, push, OpenID checks) off this server's IP.
+  # Package installs, Docker image pulls and certificate renewal can go direct, so a proxy problem
+  # can't stop the install itself.
+  PROXY_SCOPE=all
+  if curl --noproxy '*' -fsS -4 -m 8 -o /dev/null https://ifconfig.me 2>/dev/null; then
+    echo "  This server also reaches the internet directly."
+    choose "What should go through the proxy?" 1 \
+      "Only Purrlor's own traffic: federation, push, sign-in checks (recommended — downloads go direct)" \
+      "Everything: also this installer's downloads, Docker image pulls and certificate renewal"
+    if [ "$REPLY_CHOICE" = 1 ]; then PROXY_SCOPE=services; fi
+  fi
 
-  echo "Testing $(mask_url "$OUTBOUND_PROXY") ..."
+  echo "Testing $(mask_url "$OUTBOUND_PROXY") from this server ..."
   PROXY_ERR="$(mktemp)"
-  if EGRESS_IP="$(curl -fsS -4 -m 15 https://ifconfig.me 2>"$PROXY_ERR")" && [ -n "$EGRESS_IP" ]; then
+  if EGRESS_IP="$(curl -fsS -4 -m 15 -x "$OUTBOUND_PROXY" https://ifconfig.me 2>"$PROXY_ERR")" && [ -n "$EGRESS_IP" ]; then
     echo "  ok   proxy works — outbound requests will appear to come from $EGRESS_IP"
   else
-    warn "Couldn't reach https://ifconfig.me through that proxy: $(tr '\n' ' ' < "$PROXY_ERR")
-    Common causes: the address or port is wrong; the proxy wants a login (user:password@host:port);
-    or it only answers on another interface (NekoProxy binds to the agent's WireGuard IP when it
-    has one — use that address instead of localhost)."
+    PROXY_HOST="$(url_host "$OUTBOUND_PROXY")"
+    PROXY_PORT="$(printf '%s' "$OUTBOUND_PROXY" | sed -E 's#^[a-zA-Z]+://([^@/]*@)?[^:/]*:?([0-9]*).*#\2#')"
+    PROXY_PORT="${PROXY_PORT:-80}"
+    if { timeout 5 bash -c "exec 3<>/dev/tcp/$PROXY_HOST/$PROXY_PORT"; } 2>/dev/null; then
+      WHY="This server connects to $PROXY_HOST:$PROXY_PORT, but the request through it failed — usually a
+    login it wants (user:password@host:port), or it isn't an HTTP(S) forward proxy (NekoProxy: the
+    agent's Forward proxy port, not a reverse-proxy port)."
+    else
+      WHY="This server can't open a connection to $PROXY_HOST:$PROXY_PORT at all (a timeout means something
+    drops it). Check the proxy is running on that address and port, that this server can reach
+    that network ('ip route get $PROXY_HOST' should go out the WireGuard interface for a 10.x
+    address), and that the proxy host's firewall allows this server (NekoProxy: its firewall rules)."
+    fi
+    warn "The proxy test failed: $(tr '\n' ' ' < "$PROXY_ERR")
+    $WHY"
     if confirm "Carry on without a proxy instead?" y; then
       OUTBOUND_PROXY="" CONTAINER_PROXY="" OUTBOUND_NO_PROXY=""
-      unset http_proxy https_proxy no_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY
     else
       confirm "Keep this proxy anyway?" n || die "Fix the proxy (or its address), then re-run."
     fi
   fi
   rm -f "$PROXY_ERR"
+
+  # This script's own curl/apk/apt/certbot/get.docker.com calls, when everything goes through it.
+  # Both spellings, since tools disagree about which one they read.
+  if [ -n "$OUTBOUND_PROXY" ] && [ "$PROXY_SCOPE" = all ]; then
+    HOST_PROXY="$OUTBOUND_PROXY"
+    export http_proxy="$OUTBOUND_PROXY" https_proxy="$OUTBOUND_PROXY" no_proxy="$OUTBOUND_NO_PROXY"
+    export HTTP_PROXY="$OUTBOUND_PROXY" HTTPS_PROXY="$OUTBOUND_PROXY" NO_PROXY="$OUTBOUND_NO_PROXY"
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -698,9 +727,9 @@ for cmd in "${LOCAL_TOOLS[@]}"; do
     if ! pkg_install "$cmd"; then
       if [ "$OS_FAMILY" = alpine ]; then
         die "Couldn't install $cmd with apk (the error is above). Check /etc/apk/repositories has the
-    'community' repository for your Alpine release, and that 'apk update' works${OUTBOUND_PROXY:+ through the proxy}."
+    'community' repository for your Alpine release, and that 'apk update' works${HOST_PROXY:+ through the proxy}."
       fi
-      die "Couldn't install $cmd with apt (the error is above). Check that 'apt-get update' works${OUTBOUND_PROXY:+ through the proxy}."
+      die "Couldn't install $cmd with apt (the error is above). Check that 'apt-get update' works${HOST_PROXY:+ through the proxy}."
     fi
   fi
 done
@@ -713,7 +742,7 @@ if [ "$INIT" = openrc ] && [ "$EDGE_MODE" = false ]; then
 #!/bin/sh
 # Written by Purrlor deploy/setup.sh — renews Let's Encrypt certificates when they're due (it's a
 # no-op otherwise); the renewal hooks in /etc/letsencrypt/renewal-hooks reload nginx afterwards.
-${OUTBOUND_PROXY:+export HTTP_PROXY='$OUTBOUND_PROXY' HTTPS_PROXY='$OUTBOUND_PROXY' NO_PROXY='$OUTBOUND_NO_PROXY'}
+${HOST_PROXY:+export HTTP_PROXY='$HOST_PROXY' HTTPS_PROXY='$HOST_PROXY' NO_PROXY='$OUTBOUND_NO_PROXY'}
 certbot renew -q
 RENEW_EOF
   chmod 700 /etc/periodic/daily/purrlor-certbot-renew
@@ -731,7 +760,7 @@ write_systemd_proxy_dropin() {
   __file="$__dir/purrlor-proxy.conf"
   # systemd expands %-specifiers in Environment=, and a percent-encoded proxy password is full
   # of them — %% is a literal %.
-  local __p="${OUTBOUND_PROXY//%/%%}" __n="${OUTBOUND_NO_PROXY//%/%%}"
+  local __p="${HOST_PROXY//%/%%}" __n="${OUTBOUND_NO_PROXY//%/%%}"
   __new="$(printf '# Written by Purrlor deploy/setup.sh — outbound proxy for %s.\n[Service]\nEnvironment="HTTP_PROXY=%s" "HTTPS_PROXY=%s" "NO_PROXY=%s"\n' \
     "$__unit" "$__p" "$__p" "$__n")"
   if [ -f "$__file" ] && [ "$(cat "$__file")" = "$__new" ]; then return; fi
@@ -746,7 +775,7 @@ write_systemd_proxy_dropin() {
 write_openrc_docker_proxy() {
   local __file=/etc/conf.d/docker __new __block
   __block="$(printf '# BEGIN purrlor-proxy\nexport HTTP_PROXY=%q HTTPS_PROXY=%q NO_PROXY=%q\n# END purrlor-proxy' \
-    "$OUTBOUND_PROXY" "$OUTBOUND_PROXY" "$OUTBOUND_NO_PROXY")"
+    "$HOST_PROXY" "$HOST_PROXY" "$OUTBOUND_NO_PROXY")"
   touch "$__file"
   if grep -qF "$__block" "$__file"; then return; fi
   __new="$(sed '/^# BEGIN purrlor-proxy$/,/^# END purrlor-proxy$/d' "$__file")"
@@ -755,7 +784,27 @@ write_openrc_docker_proxy() {
   echo changed
 }
 
-if [ -n "$OUTBOUND_PROXY" ] && [ "$INIT" = openrc ]; then
+# A proxy an earlier run gave Docker, now that it shouldn't have one: take it back out, or image
+# pulls keep going through (and failing on) it.
+DOCKER_PROXY_REMOVED=false
+if [ -z "$HOST_PROXY" ]; then
+  if [ -f /etc/conf.d/docker ] && grep -q '^# BEGIN purrlor-proxy$' /etc/conf.d/docker; then
+    sed -i '/^# BEGIN purrlor-proxy$/,/^# END purrlor-proxy$/d' /etc/conf.d/docker
+    DOCKER_PROXY_REMOVED=true
+  fi
+  if [ -f /etc/systemd/system/docker.service.d/purrlor-proxy.conf ]; then
+    rm -f /etc/systemd/system/docker.service.d/purrlor-proxy.conf
+    systemctl daemon-reload
+    DOCKER_PROXY_REMOVED=true
+  fi
+  if [ "$DOCKER_PROXY_REMOVED" = true ]; then
+    log "Taking the proxy back out of Docker's own settings (image pulls go direct now)"
+    svc restart docker
+    for _ in $(seq 1 20); do docker info >/dev/null 2>&1 && break; sleep 1; done
+  fi
+fi
+
+if [ -n "$HOST_PROXY" ] && [ "$INIT" = openrc ]; then
   log "Configuring the outbound proxy for Docker"
   if [ "$(write_openrc_docker_proxy)" = changed ]; then
     if [ -n "$(docker ps -q 2>/dev/null)" ]; then
@@ -772,7 +821,7 @@ if [ -n "$OUTBOUND_PROXY" ] && [ "$INIT" = openrc ]; then
   echo "  ok   certificate renewal (/etc/periodic/daily/purrlor-certbot-renew) uses the proxy"
 fi
 
-if [ -n "$OUTBOUND_PROXY" ] && [ "$INIT" = systemd ]; then
+if [ -n "$HOST_PROXY" ] && [ "$INIT" = systemd ]; then
   log "Configuring the outbound proxy for Docker and certificate renewal"
 
   if [ "$(write_systemd_proxy_dropin docker.service)" = changed ]; then
@@ -805,17 +854,36 @@ if [ -n "$OUTBOUND_PROXY" ] && [ "$INIT" = systemd ]; then
 fi
 
 if [ -n "$CONTAINER_PROXY" ]; then
-  log "Checking the proxy works from inside a container"
+  log "Checking Purrlor's services will be able to use the proxy"
   PROXY_ERR="$(mktemp)"
-  if docker run --rm --add-host host.docker.internal:host-gateway curlimages/curl:latest \
+  if ! docker pull -q curlimages/curl:latest >/dev/null 2>"$PROXY_ERR"; then
+    PULL_HINT=""
+    if [ -n "$HOST_PROXY" ]; then
+      PULL_HINT="Docker downloads through the proxy right now. Re-running and choosing \"Only Purrlor's own
+    traffic\" at the proxy question lets downloads go direct."
+    fi
+    warn "Skipping this check: Docker couldn't download its small test image: $(tr '\n' ' ' < "$PROXY_ERR")
+    $PULL_HINT"
+  elif docker run --rm --add-host host.docker.internal:host-gateway curlimages/curl:latest \
        -fsS -m 15 -x "$CONTAINER_PROXY" https://ifconfig.me >/dev/null 2>"$PROXY_ERR"; then
     echo "  ok   containers reach the internet through $(mask_url "$CONTAINER_PROXY")"
   else
+    PROXY_HOST="$(url_host "$OUTBOUND_PROXY")"
+    if ip -4 -o addr show 2>/dev/null | grep -q " $PROXY_HOST/" || [ "$CONTAINER_PROXY" != "$OUTBOUND_PROXY" ]; then
+      WHY="The proxy runs on this server, and containers reach it from Docker's own network
+    (172.16.0.0/12, the docker0 bridge), not from this server's address. Either the proxy only
+    listens on another address, or its firewall only allows some interfaces — NekoProxy's firewall
+    baseline admits the forward-proxy port on the WireGuard interface only. Allow the Docker
+    network to reach port $(printf '%s' "$CONTAINER_PROXY" | sed -E 's#.*:([0-9]+)/?$#\1#') (a NekoProxy firewall rule, or run it where containers can reach)."
+    else
+      WHY="This server reaches the proxy, but its containers don't. Their traffic leaves through this
+    server too, so this is usually a firewall on this server blocking forwarded traffic from
+    Docker's network to $PROXY_HOST (check iptables' FORWARD chain)."
+    fi
     warn "Containers couldn't use $(mask_url "$CONTAINER_PROXY"): $(tr '\n' ' ' < "$PROXY_ERR")
-    This server can use the proxy, but containers can't — usually because it only listens on
-    127.0.0.1. Make it listen on this server's IP (NekoProxy: its listen address), or re-run with
-    an address containers can reach. Until then, federation, push and OpenID checks will fail."
-    confirm "Continue anyway?" n || die "Fix the proxy's listen address, then re-run."
+    $WHY
+    Until this works, federation, push notifications and OpenID checks will fail."
+    confirm "Continue anyway?" n || die "Fix that, then re-run."
   fi
   rm -f "$PROXY_ERR"
 fi
@@ -881,7 +949,12 @@ else
     echo "  ok   Matrix registration token"
   fi
 
-  VAPID_JSON="$(docker run --rm -e HTTPS_PROXY="$OUTBOUND_PROXY" -e HTTP_PROXY="$OUTBOUND_PROXY" \
+  # npx downloads web-push: direct, or through the containers' copy of the proxy when everything
+  # goes through it.
+  VAPID_PROXY=""
+  if [ -n "$HOST_PROXY" ]; then VAPID_PROXY="$CONTAINER_PROXY"; fi
+  VAPID_JSON="$(docker run --rm --add-host host.docker.internal:host-gateway \
+    -e HTTPS_PROXY="$VAPID_PROXY" -e HTTP_PROXY="$VAPID_PROXY" \
     node:20-alpine npx --yes web-push generate-vapid-keys --json 2>/dev/null || true)"
   VAPID_PUBLIC_KEY="$(printf '%s' "$VAPID_JSON" | grep -o '"publicKey":"[^"]*"' | cut -d'"' -f4)"
   VAPID_PRIVATE_KEY="$(printf '%s' "$VAPID_JSON" | grep -o '"privateKey":"[^"]*"' | cut -d'"' -f4)"

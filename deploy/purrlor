@@ -233,6 +233,14 @@ cmd_update() {
   need_root update
   say "Fetching the latest Purrlor"
   git pull --ff-only || die "git pull couldn't fast-forward — there are local changes in $REPO_ROOT. Check 'git status'."
+  # The pull may have just replaced this very script, which bash is still reading from disk as it
+  # runs. Carry on in the fresh copy instead — which also means the rest of the update is always
+  # the newest version of these steps.
+  exec "$REPO_ROOT/deploy/purrlor" update-apply
+}
+
+cmd_update_apply() {
+  need_root update
   say "Downloading the new images and restarting onto them"
   if compose pull; then
     compose up -d
@@ -295,6 +303,8 @@ cmd_signups() {
   fi
 }
 
+# The dispatcher and the `exit` after it are one command (same line as `esac`), so bash has read
+# all of it before running any of it — a script updated underneath it can't be half-read.
 case "${1:-help}" in
   help|-h|--help) cmd_help ;;
   info) cmd_info ;;
@@ -302,10 +312,11 @@ case "${1:-help}" in
   logs) shift; compose logs -f --tail 200 "$@" ;;
   restart) shift; compose restart "$@" ;;
   update) cmd_update ;;
+  update-apply) cmd_update_apply ;;
   doctor) cmd_doctor ;;
   backup) shift; cmd_backup "$@" ;;
   new-invite-code) cmd_new_invite_code ;;
   open-signups) cmd_signups open ;;
   close-signups) cmd_signups close ;;
   *) warn "Unknown command: $1"; echo; cmd_help; exit 1 ;;
-esac
+esac; exit $?

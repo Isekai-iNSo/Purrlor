@@ -159,11 +159,70 @@ if [ "$(id -u)" -ne 0 ]; then
   die "Run this as root (sudo bash deploy/setup.sh) — it installs system packages and writes to /etc/nginx and /etc/letsencrypt."
 fi
 
-if ! need_cmd apt-get; then
-  die "This script is written for Debian/Ubuntu (apt-get). Follow docs/deployment.md manually on other distros."
+# Two families are supported: Alpine (apk + OpenRC) and Debian/Ubuntu (apt + systemd). Everything
+# that differs between them goes through the few helpers below.
+if need_cmd apk; then
+  OS_FAMILY=alpine
+elif need_cmd apt-get; then
+  OS_FAMILY=debian
+else
+  die "This script supports Alpine, Debian and Ubuntu. On other systems, follow docs/deployment.md by hand."
+fi
+if need_cmd systemctl && [ -d /run/systemd/system ]; then
+  INIT=systemd
+elif need_cmd rc-service; then
+  INIT=openrc
+else
+  die "Couldn't find systemd or OpenRC to manage services with."
 fi
 
+APT_UPDATED=false
+pkg_install() {
+  if [ "$OS_FAMILY" = alpine ]; then
+    apk add --no-cache "$@"
+  else
+    if [ "$APT_UPDATED" = false ]; then apt-get update -qq; APT_UPDATED=true; fi
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$@"
+  fi
+}
+
+# Docker and certbot are in Alpine's "community" repository, which a minimal install often has
+# commented out. Turns on the one matching the enabled "main" repository (same mirror, same
+# release), never edge.
+alpine_enable_community() {
+  local __main __community
+  __main="$(grep -E '^[^#].*/main/?$' /etc/apk/repositories | head -n1 || true)"
+  [ -n "$__main" ] || return 0
+  __community="$(printf '%s' "$__main" | sed -E 's#/main/?$#/community#')"
+  grep -qxF "$__community" /etc/apk/repositories && return 0
+  echo "  enabling Alpine's community repository ($__community)"
+  echo "$__community" >> /etc/apk/repositories
+  apk update -q
+}
+
+# svc ACTION NAME — start/stop/restart/reload a service, whichever init system this is.
+svc() {
+  if [ "$INIT" = systemd ]; then systemctl "$1" "$2"; else rc-service "$2" "$1"; fi
+}
+
+# svc_enable NAME — start it now and at every boot.
+svc_enable() {
+  if [ "$INIT" = systemd ]; then
+    systemctl enable --now "$1" >/dev/null 2>&1 || systemctl start "$1"
+  else
+    rc-update add "$1" default >/dev/null 2>&1 || true
+    rc-service "$1" status >/dev/null 2>&1 || rc-service "$1" start
+  fi
+}
+
 log "Purrlor guided deploy — see docs/deployment.md for the full explanation of each step."
+echo "  system: $OS_FAMILY ($INIT)"
+
+# What this script itself runs before it installs anything else. Stock Alpine has neither.
+if ! need_cmd curl || ! need_cmd openssl; then
+  log "Installing curl and openssl"
+  pkg_install curl openssl ca-certificates >/dev/null
+fi
 
 # ---------------------------------------------------------------------------
 # Is this server big enough?
@@ -192,6 +251,8 @@ if [ $((MEM_MB + SWAP_MB)) -lt 3800 ]; then
       mkswap /swapfile >/dev/null
       swapon /swapfile
       grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+      # systemd mounts fstab swap by itself; OpenRC only with its swap service in the boot runlevel.
+      if [ "$INIT" = openrc ]; then rc-update add swap boot >/dev/null 2>&1 || true; fi
       echo "  ok   swap added (and kept across reboots)"
     else
       warn "Continuing without swap — if the build fails with exit code 137, re-run and say yes."
@@ -212,12 +273,20 @@ fi
 
 # Something other than nginx on 80/443 (Apache, Caddy, another stack's proxy) would make both the
 # certificate request and nginx fail later with a much less obvious message.
+# port_holder PORT -> the name of the program listening on that TCP port (empty if none).
+port_holder() {
+  if need_cmd ss; then
+    ss -ltnpH "sport = :$1" 2>/dev/null | grep -o 'users:(("[^"]*"' | head -n1 | cut -d'"' -f2 || true
+  else
+    # busybox netstat: "tcp 0 0 0.0.0.0:80 0.0.0.0:* LISTEN 1234/nginx: master"
+    netstat -ltnp 2>/dev/null | awk -v p=":$1" '$4 ~ p"$" {print $7}' | head -n1 | cut -d/ -f2 | cut -d: -f1 || true
+  fi
+}
 for port in 80 443; do
-  HOLDER="$(ss -ltnpH "sport = :$port" 2>/dev/null | grep -o 'users:(("[^"]*"' | head -n1 | cut -d'"' -f2 || true)"
+  HOLDER="$(port_holder "$port")"
   if [ -n "$HOLDER" ] && [ "$HOLDER" != nginx ]; then
     die "Port $port is already in use by '$HOLDER'. Purrlor's nginx needs ports 80 and 443 — stop and
-    disable '$HOLDER' (e.g. systemctl disable --now $HOLDER), or use a server that isn't already
-    running a website, then re-run."
+    disable '$HOLDER', or use a server that isn't already running a website, then re-run."
   fi
 done
 echo "  ok   ports 80 and 443 are free (or already nginx's)"
@@ -476,21 +545,52 @@ fi
 
 log "Checking required tools"
 
-if ! need_cmd docker; then
-  log "Installing Docker"
-  curl -fsSL https://get.docker.com | sh
+if [ "$OS_FAMILY" = alpine ]; then
+  alpine_enable_community
+  if ! need_cmd docker || ! docker compose version >/dev/null 2>&1; then
+    log "Installing Docker"
+    pkg_install docker docker-cli-compose
+  fi
+  # Alpine installs services stopped and not started at boot; the stack's restart policies only
+  # bring it back after a reboot if Docker itself comes back.
+  svc_enable docker
+  for _ in $(seq 1 20); do docker info >/dev/null 2>&1 && break; sleep 1; done
+  docker info >/dev/null 2>&1 || die "Docker is installed but its daemon didn't start — check: rc-service docker status"
+else
+  if ! need_cmd docker; then
+    log "Installing Docker"
+    curl -fsSL https://get.docker.com | sh
+  fi
+  svc_enable docker
 fi
 if ! docker compose version >/dev/null 2>&1; then
-  die "Docker installed but the 'docker compose' plugin isn't available — install docker-compose-plugin and re-run."
+  if [ "$OS_FAMILY" = alpine ]; then
+    die "Docker is installed but 'docker compose' isn't — run: apk add docker-cli-compose, then re-run."
+  fi
+  die "Docker is installed but 'docker compose' isn't — install docker-compose-plugin and re-run."
 fi
 
-for pkg_cmd in "certbot:certbot" "nginx:nginx" "openssl:openssl"; do
-  pkg="${pkg_cmd%%:*}"; cmd="${pkg_cmd##*:}"
+for cmd in certbot nginx; do
   if ! need_cmd "$cmd"; then
-    log "Installing $pkg"
-    apt-get update -qq && apt-get install -y "$pkg"
+    log "Installing $cmd"
+    pkg_install "$cmd"
   fi
 done
+
+# Certificates renew from a systemd timer on Debian/Ubuntu (certbot's package installs it). Alpine
+# has no timer, so renewal runs from cron's daily jobs instead — without it the certificate
+# quietly expires in 90 days.
+if [ "$INIT" = openrc ]; then
+  cat > /etc/periodic/daily/purrlor-certbot-renew <<RENEW_EOF
+#!/bin/sh
+# Written by Purrlor deploy/setup.sh — renews Let's Encrypt certificates when they're due (it's a
+# no-op otherwise); the renewal hooks in /etc/letsencrypt/renewal-hooks reload nginx afterwards.
+${OUTBOUND_PROXY:+export HTTP_PROXY='$OUTBOUND_PROXY' HTTPS_PROXY='$OUTBOUND_PROXY' NO_PROXY='$OUTBOUND_NO_PROXY'}
+certbot renew -q
+RENEW_EOF
+  chmod 700 /etc/periodic/daily/purrlor-certbot-renew
+  svc_enable crond
+fi
 
 echo "  ok   docker, docker compose, certbot, nginx, openssl all present"
 
@@ -513,7 +613,38 @@ write_systemd_proxy_dropin() {
   echo changed
 }
 
-if [ -n "$OUTBOUND_PROXY" ]; then
+# write_openrc_docker_proxy -> the same for OpenRC, whose Docker service sources /etc/conf.d/docker
+# as a shell script. Replaces its own marked block, so a re-run with another proxy doesn't stack.
+write_openrc_docker_proxy() {
+  local __file=/etc/conf.d/docker __new __block
+  __block="$(printf '# BEGIN purrlor-proxy\nexport HTTP_PROXY=%q HTTPS_PROXY=%q NO_PROXY=%q\n# END purrlor-proxy' \
+    "$OUTBOUND_PROXY" "$OUTBOUND_PROXY" "$OUTBOUND_NO_PROXY")"
+  touch "$__file"
+  if grep -qF "$__block" "$__file"; then return; fi
+  __new="$(sed '/^# BEGIN purrlor-proxy$/,/^# END purrlor-proxy$/d' "$__file")"
+  printf '%s\n%s\n' "$__new" "$__block" > "$__file"
+  chmod 600 "$__file"
+  echo changed
+}
+
+if [ -n "$OUTBOUND_PROXY" ] && [ "$INIT" = openrc ]; then
+  log "Configuring the outbound proxy for Docker"
+  if [ "$(write_openrc_docker_proxy)" = changed ]; then
+    if [ -n "$(docker ps -q 2>/dev/null)" ]; then
+      warn "Docker has to restart to pick up the proxy, which briefly stops the containers already
+    running on this host (ones with a restart policy come back on their own)."
+      confirm "Restart Docker now?" y || die "Docker can't pull images through the proxy until it restarts — re-run when it's OK to."
+    fi
+    svc restart docker
+    for _ in $(seq 1 20); do docker info >/dev/null 2>&1 && break; sleep 1; done
+    echo "  ok   Docker daemon uses the proxy for image pulls"
+  else
+    echo "  ok   Docker daemon already configured for this proxy"
+  fi
+  echo "  ok   certificate renewal (/etc/periodic/daily/purrlor-certbot-renew) uses the proxy"
+fi
+
+if [ -n "$OUTBOUND_PROXY" ] && [ "$INIT" = systemd ]; then
   log "Configuring the outbound proxy for Docker and certificate renewal"
 
   if [ "$(write_systemd_proxy_dropin docker.service)" = changed ]; then
@@ -693,7 +824,7 @@ if cert_covers_all; then
   log "Reusing the existing certificate at $CERT_DIR (it covers every domain and isn't about to expire)"
 else
   log "Requesting a TLS certificate (stopping nginx briefly to free port 80)"
-  systemctl stop nginx 2>/dev/null || true
+  svc stop nginx >/dev/null 2>&1 || true
   CERTBOT_DOMAIN_ARGS=()
   for d in "${DNS_CHECK_DOMAINS[@]}"; do
     CERTBOT_DOMAIN_ARGS+=(-d "$d")
@@ -706,9 +837,10 @@ else
     || die "certbot failed — check DNS has propagated for all domains and that port 80 is reachable from the internet, then re-run."
 
   mkdir -p /etc/letsencrypt/renewal-hooks/deploy
-  cat > /etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh <<'HOOK_EOF'
+  if [ "$INIT" = systemd ]; then RELOAD_NGINX="systemctl reload nginx"; else RELOAD_NGINX="rc-service nginx reload"; fi
+  cat > /etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh <<HOOK_EOF
 #!/bin/sh
-systemctl reload nginx
+$RELOAD_NGINX
 HOOK_EOF
   chmod +x /etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh
   echo "  ok   certificate issued, renewal reload-hook installed"
@@ -796,7 +928,17 @@ fi
 
 log "Writing nginx config"
 
-cat > /etc/nginx/sites-available/purrlor.conf <<NGINX_EOF
+# Debian/Ubuntu: sites-available, enabled by a symlink in sites-enabled. Alpine: every file in
+# http.d is loaded as it is.
+if [ -d /etc/nginx/sites-available ] || [ "$OS_FAMILY" = debian ]; then
+  mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled
+  NGINX_SITE=/etc/nginx/sites-available/purrlor.conf
+else
+  mkdir -p /etc/nginx/http.d
+  NGINX_SITE=/etc/nginx/http.d/purrlor.conf
+fi
+
+cat > "$NGINX_SITE" <<NGINX_EOF
 server {
     listen 443 ssl http2;
     server_name $APP_DOMAIN;
@@ -859,7 +1001,7 @@ REDIRECT_DOMAINS="$APP_DOMAIN $LIVEKIT_DOMAIN"
 if [ "$PROVISION_MATRIX" = true ]; then
   REDIRECT_DOMAINS="$REDIRECT_DOMAINS $MATRIX_DOMAIN"
   echo "  ok   adding nginx blocks for the new homeserver ($MATRIX_DOMAIN, federation on 8448)"
-  cat >> /etc/nginx/sites-available/purrlor.conf <<MATRIX_NGINX_EOF
+  cat >> "$NGINX_SITE" <<MATRIX_NGINX_EOF
 
 server {
     listen 443 ssl http2;
@@ -905,7 +1047,7 @@ MATRIX_NGINX_EOF
   if [ "$MATRIX_DELEGATED" = true ]; then
     REDIRECT_DOMAINS="$REDIRECT_DOMAINS $BASE_DOMAIN"
     echo "  ok   and well-known delegation on $BASE_DOMAIN (addresses read @name:$BASE_DOMAIN)"
-    cat >> /etc/nginx/sites-available/purrlor.conf <<DELEGATION_NGINX_EOF
+    cat >> "$NGINX_SITE" <<DELEGATION_NGINX_EOF
 
 server {
     # The bare domain is never a real endpoint of its own — it only exists so Matrix user IDs
@@ -934,7 +1076,7 @@ DELEGATION_NGINX_EOF
   fi
 fi
 
-cat >> /etc/nginx/sites-available/purrlor.conf <<REDIRECT_EOF
+cat >> "$NGINX_SITE" <<REDIRECT_EOF
 
 server {
     listen 80;
@@ -954,13 +1096,29 @@ if [ -e /etc/nginx/sites-enabled/nekous.conf ] || [ -e /etc/nginx/sites-availabl
   echo "  ok   retired the old nekous.conf (kept as sites-available/nekous.conf.bak)"
 fi
 
-# Debian/Ubuntu's stock site answers every name on port 80 as default_server; harmless next to
-# ours, but it's a "Welcome to nginx" page for anything that reaches this IP by mistake.
-rm -f /etc/nginx/sites-enabled/default
+# nginx 1.25.1 moved HTTP/2 from a listen flag to its own directive and warns about the old form
+# (Alpine ships the new one); older versions (Debian 12's 1.22) don't know the new directive at all.
+# The config above is written in the old form, and rewritten here when this nginx is new enough.
+NGINX_VERSION="$(nginx -v 2>&1 | sed -n 's#.*nginx/\([0-9.]*\).*#\1#p')"
+if printf '%s\n' "$NGINX_VERSION" | awk -F. '{ exit !($1 > 1 || ($1 == 1 && ($2 > 25 || ($2 == 25 && $3 >= 1)))) }'; then
+  awk '{
+    if (match($0, /listen (443|8448) ssl http2;/)) {
+      indent = substr($0, 1, RSTART - 1); port = ($0 ~ /8448/) ? "8448" : "443"
+      print indent "listen " port " ssl;"; print indent "http2 on;"
+    } else print
+  }' "$NGINX_SITE" > "$NGINX_SITE.tmp" && mv "$NGINX_SITE.tmp" "$NGINX_SITE"
+fi
 
-ln -sf /etc/nginx/sites-available/purrlor.conf /etc/nginx/sites-enabled/purrlor.conf
-nginx -t || die "nginx config test failed — check /etc/nginx/sites-available/purrlor.conf"
-systemctl restart nginx
+# The distro's stock site answers every name on port 80 as default_server; harmless next to ours,
+# but it's a "Welcome to nginx" (or bare 404) page for anything that reaches this IP by mistake.
+rm -f /etc/nginx/sites-enabled/default /etc/nginx/http.d/default.conf
+
+if [ "$NGINX_SITE" = /etc/nginx/sites-available/purrlor.conf ]; then
+  ln -sf /etc/nginx/sites-available/purrlor.conf /etc/nginx/sites-enabled/purrlor.conf
+fi
+nginx -t || die "nginx config test failed — check $NGINX_SITE"
+svc_enable nginx
+svc restart nginx
 echo "  ok   nginx configured and running"
 
 # ---------------------------------------------------------------------------

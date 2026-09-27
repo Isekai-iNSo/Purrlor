@@ -2,11 +2,24 @@
 
 ## The quick way
 
-On a fresh Debian 12 or Ubuntu 22.04/24.04 server, as root:
+On a fresh server, as root. **Alpine** (3.20 or newer):
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/m0nnnna/Purrlor/master/install.sh | sudo bash
+```sh
+wget -qO- https://raw.githubusercontent.com/m0nnnna/Purrlor/master/install.sh | sh
 ```
+
+**Debian 12 / Ubuntu 22.04 or 24.04:**
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/m0nnnna/Purrlor/master/install.sh | sudo sh
+```
+
+On Alpine it uses `apk` and OpenRC: it installs Docker from Alpine's own packages (switching on the
+community repository if it's off), starts Docker, nginx and cron at boot, writes nginx's config to
+`/etc/nginx/http.d/`, and renews certificates from a daily cron job
+(`/etc/periodic/daily/purrlor-certbot-renew`), since Alpine has no systemd timers. The manual steps
+below are written for Debian/Ubuntu; on Alpine, read `apk add` for `apt install` and
+`rc-service <name> <action>` for `systemctl <action> <name>`.
 
 That clones Purrlor into `/opt/purrlor` and runs the guided installer (`deploy/setup.sh`, described
 under "The guided script" below). It asks a few questions, shows you the DNS records to create and

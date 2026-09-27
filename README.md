@@ -270,7 +270,8 @@ in about ten minutes.
 
 ### What you need
 
-- **A server** running Debian 12 or Ubuntu 22.04/24.04, with a public IP and root access.
+- **A server** running Alpine Linux (3.20 or newer), Debian 12, or Ubuntu 22.04/24.04, with a
+  public IP and root access.
   2 GB of RAM is enough to run it (the installer adds swap if the build needs more).
 - **A domain** you can add DNS records to.
 - These ports open at your provider's firewall: **80, 443, 7881/tcp, 7882/udp**, and **8448**
@@ -278,10 +279,16 @@ in about ten minutes.
 
 ### Install
 
-SSH into the server and run:
+SSH into the server and run, on **Alpine** (as root):
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/m0nnnna/Purrlor/master/install.sh | sudo bash
+```sh
+wget -qO- https://raw.githubusercontent.com/m0nnnna/Purrlor/master/install.sh | sh
+```
+
+or on **Debian / Ubuntu**:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/m0nnnna/Purrlor/master/install.sh | sudo sh
 ```
 
 It downloads Purrlor into `/opt/purrlor` and asks a few questions: your domain, your email, and

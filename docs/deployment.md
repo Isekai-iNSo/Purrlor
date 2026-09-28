@@ -431,9 +431,10 @@ A few things to know:
   `web`, `matrix`, plus loopback). The script's default does; without them the token server
   would send its calls to LiveKit and the homeserver to the proxy.
 - **HTTP(S) proxies only.** SOCKS isn't supported by Node's proxy support.
-- **DNS.** The `matrix` container resolves names through `deploy/continuwuity-resolv.conf`
-  (1.1.1.1 / 8.8.8.8). If this network blocks direct DNS too, point that file at a resolver
-  the host can reach.
+- **DNS.** The `matrix` container resolves names through `matrix-resolv.conf`, which `purrlor`
+  writes before every start: this server's own DNS servers first (from `/etc/resolv.conf`, or
+  systemd-resolved's upstreams), then 1.1.1.1 as a fallback. So a name only your local network
+  knows, like a mail server on the LAN, resolves there too.
 
 ## Variant: split edge-proxy + origin topology
 

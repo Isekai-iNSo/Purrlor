@@ -225,8 +225,15 @@ services:
       - matrix-db:/var/lib/continuwuity
       # Docker's default embedded DNS resolver causes federation lookup timeouts for Continuwuity
       # (documented upstream behavior, not specific to this deployment) — mounting a real
-      # resolv.conf works around it.
-      - ./continuwuity-resolv.conf:/etc/resolv.conf:ro
+      # resolv.conf works around it. `purrlor` writes it from this server's own DNS settings
+      # before every start (write_matrix_resolv); a missing file is an error rather than Docker
+      # quietly creating an empty directory in its place.
+      - type: bind
+        source: ../matrix-resolv.conf
+        target: /etc/resolv.conf
+        read_only: true
+        bind:
+          create_host_path: false
     networks:
       - purrlor-voice
 

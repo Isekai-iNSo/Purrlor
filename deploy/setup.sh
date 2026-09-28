@@ -1528,7 +1528,9 @@ if [ "$PROVISION_MATRIX" = true ]; then
   fi
 
   log "Starting the new homeserver first (its accounts need to exist before the rest of the stack can use them)"
-  # The homeserver is an upstream image — nothing of ours to build.
+  # The homeserver is an upstream image — nothing of ours to build. Its DNS settings come from this
+  # server's (write_matrix_resolv in deploy/purrlor).
+  bash "$REPO_ROOT/deploy/purrlor" matrix-dns
   docker compose -f deploy/docker-compose.yml --env-file .env "${COMPOSE_PROFILE_ARGS[@]}" up -d matrix
 
   log "Waiting for it to come up"

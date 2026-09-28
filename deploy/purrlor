@@ -31,9 +31,38 @@ env_set() {
 
 has_matrix() { [ "$(env_get COMPOSE_PROFILES)" = matrix ]; }
 
+# The homeserver container's DNS: this server's own resolvers first, so names only the local
+# network knows (a mail server on the LAN, say) resolve the same inside it as out here; public
+# ones after, as a fallback. Not Docker's embedded resolver, which upstream documents as causing
+# federation lookup timeouts. Written per server, so it isn't in git.
+MATRIX_RESOLV="$REPO_ROOT/matrix-resolv.conf"
+write_matrix_resolv() {
+  local src=/etc/resolv.conf key ns picked=() out
+  # systemd-resolved's stub (127.0.0.53) can't be reached from a container; this lists its upstreams.
+  if [ -f /run/systemd/resolve/resolv.conf ] && grep -q '^nameserver 127\.' /etc/resolv.conf; then
+    src=/run/systemd/resolve/resolv.conf
+  fi
+  while read -r key ns _; do
+    [ "$key" = nameserver ] || continue
+    case "$ns" in 127.*|::1|0.0.0.0|fe80:*) continue ;; esac
+    if [ "${#picked[@]}" -lt 2 ]; then picked+=("$ns"); fi
+  done < "$src"
+  # Resolvers are tried in order, three at most — a public one always gets a slot.
+  for ns in 1.1.1.1 8.8.8.8; do
+    [ "${#picked[@]}" -lt 3 ] || break
+    case " ${picked[*]} " in *" $ns "*) ;; *) picked+=("$ns") ;; esac
+  done
+  out="# Written by purrlor from this server's DNS settings ($src) — don't edit, it's rewritten on
+# every start. The homeserver container's /etc/resolv.conf: see write_matrix_resolv in deploy/purrlor."
+  for ns in "${picked[@]}"; do out="$out
+nameserver $ns"; done
+  printf '%s\n' "$out" > "$MATRIX_RESOLV"
+}
+
 compose() {
   local __profile=()
   if has_matrix; then __profile=(--profile matrix); fi
+  if has_matrix && [ "${1:-}" = up ]; then write_matrix_resolv; fi
   docker compose -f deploy/docker-compose.yml --env-file .env "${__profile[@]}" "$@"
 }
 
@@ -353,8 +382,10 @@ urlencode() {
 # email_hint ERROR -> a plain-language next step for the homeserver's SMTP error, if there is one.
 email_hint() {
   case "$1" in
+    *"invalid domain character"*)
+      echo "Use the mail server's name, not its IP address: the connection is encrypted, and its certificate is for the name." ;;
     *"lookup address"*|*"Name or service not known"*|*"Name does not resolve"*)
-      echo "That mail server's name doesn't resolve — check the spelling of the host." ;;
+      echo "The homeserver couldn't look that name up. It asks this server's own DNS servers first (from /etc/resolv.conf), then 1.1.1.1 — check the spelling, and that one of those knows the name." ;;
     *"STARTTLS is not supported"*)
       echo "That port doesn't offer STARTTLS. Most providers use 587 for it; for port 465 choose the TLS option." ;;
     *"authentication"*|*"Authentication"*|*"535"*|*"credentials"*)
@@ -560,5 +591,6 @@ case "${1:-help}" in
   close-signups) cmd_signups close ;;
   email) shift; cmd_email "$@" ;;
   email-apply) cmd_email_apply ;;
+  matrix-dns) write_matrix_resolv ;;
   *) warn "Unknown command: $1"; echo; cmd_help; exit 1 ;;
 esac; exit $?

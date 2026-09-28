@@ -55,7 +55,11 @@ default. There are two ways to go:
   token server just takes a homeserver URL + bot credentials and doesn't care which homeserver
   software is actually behind them. It also asks who may sign up:
   - **Invite-only** (the default): sign-up needs `MATRIX_REGISTRATION_TOKEN`, which the script
-    prints at the end for you to hand out. Purrlor's register screen asks for it.
+    prints at the end for you to hand out. Purrlor's register screen asks for it. Optionally,
+    new accounts also have to confirm an email address.
+  - **By email**: anyone who confirms an email address (from a link the homeserver sends) can
+    sign up, no code needed. Needs a mail server to send from. Switch between this and "code plus
+    email" any time with `purrlor email codes off` / `purrlor email codes on`.
   - **Closed**: nobody but you and the voice bot. Create accounts later from the admin room
     (`!admin users create-user <name>`), or reopen sign-up with `MATRIX_ALLOW_REGISTRATION=true`.
 
@@ -363,7 +367,7 @@ In order, it:
    For Option B: whether addresses should read `@name:YOUR_DOMAIN` (the bare domain points here
    too) or `@name:matrix.YOUR_DOMAIN` (the bare domain is left alone — the default when it already
    points somewhere else, like an existing website), and who may sign up (invite-only with a
-   sign-up code, or closed).
+   sign-up code, anyone who confirms an email address, or closed).
 4. **Walks you through DNS** — lists exactly which records to create, then checks them, again
    whenever you press Enter, until they all point here (catching a stray AAAA record too).
 5. **Installs** Docker, nginx and certbot if they're missing; generates every secret; writes

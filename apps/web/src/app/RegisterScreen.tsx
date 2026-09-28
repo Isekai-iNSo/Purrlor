@@ -4,7 +4,7 @@ import { Modal } from '../components/Modal';
 import { EmailVerificationModal } from './EmailVerificationModal';
 import { initClient, startClient } from '../matrix/client';
 import { bootstrapNewAccountEncryption } from '../matrix/e2eeSetup';
-import { registerAccount, RegistrationError, type EmailVerification, type TermsPolicy } from '../matrix/registration';
+import { registerAccount, RegistrationError, type EmailRetry, type EmailVerification, type TermsPolicy } from '../matrix/registration';
 import { clearSession } from '../matrix/session';
 import { getRuntimeConfig, homeserverDisplayName } from './runtimeConfig';
 import './RegisterScreen.css';
@@ -45,6 +45,7 @@ export function RegisterScreen({ onSwitchToLogin, onRegistered }: RegisterScreen
   const [tokenInput, setTokenInput] = useState('');
   const tokenResolverRef = useRef<((token: string | null) => void) | null>(null);
   const [pendingEmailMx, setPendingEmailMx] = useState<MatrixClient | null>(null);
+  const [pendingEmailRetry, setPendingEmailRetry] = useState<EmailRetry>();
   const emailResolverRef = useRef<{
     resolve: (result: EmailVerification) => void;
     reject: (err: Error) => void;
@@ -63,7 +64,8 @@ export function RegisterScreen({ onSwitchToLogin, onRegistered }: RegisterScreen
     termsResolverRef.current = null;
   };
 
-  const verifyEmail = (mx: MatrixClient): Promise<EmailVerification> => {
+  const verifyEmail = (mx: MatrixClient, retry?: EmailRetry): Promise<EmailVerification> => {
+    setPendingEmailRetry(retry);
     setPendingEmailMx(mx);
     return new Promise((resolve, reject) => {
       emailResolverRef.current = { resolve, reject };
@@ -276,7 +278,12 @@ export function RegisterScreen({ onSwitchToLogin, onRegistered }: RegisterScreen
       )}
 
       {pendingEmailMx && (
-        <EmailVerificationModal mx={pendingEmailMx} onVerified={handleEmailVerified} onCancel={handleEmailCancelled} />
+        <EmailVerificationModal
+          // A retry is a fresh modal on the same address, so it starts from that state.
+          key={pendingEmailRetry ? 'retry' + pendingEmailRetry.previous.sid : 'new'}
+          mx={pendingEmailMx}
+          retry={pendingEmailRetry}
+          onVerified={handleEmailVerified} onCancel={handleEmailCancelled} />
       )}
     </div>
   );

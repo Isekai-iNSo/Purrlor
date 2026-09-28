@@ -25,7 +25,8 @@ homeserver — including a self-hosted one) plus a username/password to log in, 
 to create a new account on that homeserver. A deployment can lock the app to its own homeserver
 (`PURRLOR_HOMESERVER_URL`, which the guided installer sets); the homeserver field is then replaced
 by the server's name. On an invite-only server, "Register" asks for the registration token the
-server's admin handed out. A brand-new session may show a recovery prompt to
+server's admin handed out; on one that signs people up by email, it asks to confirm an email
+address instead. A brand-new session may show a recovery prompt to
 unlock past encrypted history — enter the account's recovery key/passphrase, verify from another
 already-signed-in device via emoji comparison, or skip it for now and unlock it later from Account
 Settings.

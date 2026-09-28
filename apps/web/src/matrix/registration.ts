@@ -5,14 +5,19 @@ import { setSession, type Session } from './session';
 export class RegistrationError extends Error {}
 
 export type TermsPolicy = { name: string; url: string; version: string };
-export type EmailVerification = { sid: string; clientSecret: string };
+export type EmailVerification = { sid: string; clientSecret: string; email: string };
+
+/** The server turned down an email verification — almost always because the link in the email
+ *  hasn't been clicked yet. Carries what's needed to pick up where the user left off. */
+export type EmailRetry = { previous: EmailVerification; error: string };
 
 /** What the caller needs to resolve mid-registration when the server asks for it. */
 export type RegistrationPrompts = {
   acceptTerms: (policies: TermsPolicy[]) => Promise<boolean>;
   /** Given the (still-unauthenticated) registration client, drive an email-verification UI and
-   *  resolve once the address has actually been confirmed. */
-  verifyEmail: (mx: MatrixClient) => Promise<EmailVerification>;
+   *  resolve once the address has actually been confirmed. `retry` is set when the server
+   *  rejected the last one: resume on that same address (no second email) and show why. */
+  verifyEmail: (mx: MatrixClient, retry?: EmailRetry) => Promise<EmailVerification>;
   /** Ask for the invite token an invite-only server hands out. `previousError` is the server's
    *  rejection of the last token tried, if any. Resolve null to give up. */
   enterRegistrationToken: (previousError?: string) => Promise<string | null>;
@@ -25,6 +30,9 @@ const SUPPORTED_STAGES = new Set<string>([
   AuthType.RegistrationToken,
   AuthType.UnstableRegistrationToken,
 ]);
+
+const isTokenStage = (stage: string) =>
+  stage === AuthType.RegistrationToken || stage === AuthType.UnstableRegistrationToken;
 
 function extractTermsPolicies(params: Record<string, Record<string, unknown>> | undefined): TermsPolicy[] {
   const policies = params?.[AuthType.Terms]?.policies as
@@ -60,8 +68,10 @@ export async function registerAccount(
 
   let sessionId: string | null = null;
   let auth: Record<string, unknown> | undefined;
+  let lastEmail: EmailVerification | undefined;
 
-  for (let attempt = 0; attempt < 8; attempt += 1) {
+  // Generous: pressing "continue" before clicking the email's link costs a round each time.
+  for (let attempt = 0; attempt < 20; attempt += 1) {
     try {
       const res = await mx.register(username, password, sessionId, auth as { session?: string; type: string });
       if (!res.access_token || !res.device_id) {
@@ -87,7 +97,12 @@ export async function registerAccount(
       sessionId = uia.session ?? sessionId;
 
       const completed = new Set(uia.completed ?? []);
-      const flow = uia.flows?.find((f) => f.stages.every((stage) => SUPPORTED_STAGES.has(stage)));
+      const usable = (uia.flows ?? []).filter(
+        (f) => f.stages.every((stage) => SUPPORTED_STAGES.has(stage)) && [...completed].every((c) => f.stages.includes(c))
+      );
+      // A server open to anyone with a verified email address can still offer an invite-code
+      // route alongside it (Continuwuity does) — most people have no code, so don't ask for one.
+      const flow = usable.find((f) => !f.stages.some(isTokenStage)) ?? usable[0];
       if (!flow) {
         const required = uia.flows?.[0]?.stages.join(', ') ?? 'additional verification';
         throw new RegistrationError(
@@ -107,7 +122,12 @@ export async function registerAccount(
         }
         auth = { type: nextStage, session: sessionId ?? undefined };
       } else if (nextStage === AuthType.Email) {
-        const { sid, clientSecret } = await prompts.verifyEmail(mx);
+        // Continuwuity (and Synapse) answer an unconfirmed address with this same stage again,
+        // plus the reason — so it's the same person on the same address, not a fresh start.
+        const retry =
+          auth?.type === nextStage && lastEmail ? { previous: lastEmail, error: uia.error ?? '' } : undefined;
+        lastEmail = await prompts.verifyEmail(mx, retry);
+        const { sid, clientSecret } = lastEmail;
         auth = {
           type: nextStage,
           session: sessionId ?? undefined,
@@ -116,7 +136,7 @@ export async function registerAccount(
           // id_access_token as required, but those only apply to the delegated-IS case.
           threepid_creds: { sid, client_secret: clientSecret },
         };
-      } else if (nextStage === AuthType.RegistrationToken || nextStage === AuthType.UnstableRegistrationToken) {
+      } else if (isTokenStage(nextStage)) {
         // A wrong token comes back as another 401 for this same stage with `error` set, which
         // lands here again — so re-asking shows the user why, instead of failing the whole form.
         const retrying = auth?.type === nextStage;

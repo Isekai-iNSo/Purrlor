@@ -114,6 +114,19 @@ confirm() {
 
 need_cmd() { command -v "$1" >/dev/null 2>&1; }
 
+# urlencode STRING -> STRING made safe to put in a URL (a password with @ or : in it, say).
+urlencode() {
+  local LC_ALL=C s="$1" out="" c i
+  for ((i = 0; i < ${#s}; i++)); do
+    c="${s:i:1}"
+    case "$c" in
+      [A-Za-z0-9._~-]) out+="$c" ;;
+      *) out+="$(printf '%%%02X' "'$c")" ;;
+    esac
+  done
+  printf '%s' "$out"
+}
+
 # json_escape STRING -> prints STRING with backslashes/double-quotes escaped for embedding in a
 # JSON string literal. Good enough for typical passwords/usernames; doesn't handle raw control
 # characters, which don't show up in anything a person types at these prompts.
@@ -553,8 +566,61 @@ if confirm "Set up a new Matrix homeserver as part of this install?" y; then
   echo
   choose "Who can create accounts on it?" 1 \
     "Invite-only: people need a sign-up code you hand out (recommended)" \
+    "Anyone who confirms an email address, no code needed (needs a mail server to send from)" \
     "Closed: only you and the voice bot; add people later from the admin room"
-  if [ "$REPLY_CHOICE" = 1 ]; then MATRIX_REGISTRATION_MODE=token; else MATRIX_REGISTRATION_MODE=closed; fi
+  case "$REPLY_CHOICE" in
+    1) MATRIX_REGISTRATION_MODE=token ;;
+    2) MATRIX_REGISTRATION_MODE=email ;;
+    *) MATRIX_REGISTRATION_MODE=closed ;;
+  esac
+
+  # Email verification: the homeserver emails a link to confirm the address before an account
+  # is created. Needs a mail server to send through, so it's optional — and can be added any time
+  # later with `purrlor email setup`.
+  SMTP_URI=""
+  SMTP_SENDER=""
+  if [ -f matrix-email.env ] || [ -f matrix-email.env.paused ]; then
+    echo
+    echo "  New accounts verify their email address (set up on an earlier run) — that stays on."
+    echo "  ('purrlor email setup' changes the mail server, 'purrlor email off' turns it off.)"
+  elif [ "$MATRIX_REGISTRATION_MODE" != closed ]; then
+    echo
+    WANT_EMAIL=true
+    if [ "$MATRIX_REGISTRATION_MODE" = token ]; then
+      echo "  Optionally, new accounts can also have to confirm an email address (by clicking a link"
+      echo "  the server emails them). That needs a mail server to send from: your email provider's"
+      echo "  SMTP settings, or a sending service (Resend, Postmark, Mailgun, Amazon SES, Brevo...)."
+      confirm "Require a verified email address for new accounts?" n || WANT_EMAIL=false
+    else
+      echo "  New accounts confirm their email address by clicking a link the server emails them."
+      echo "  That needs a mail server to send from: your email provider's SMTP settings, or a"
+      echo "  sending service (Resend, Postmark, Mailgun, Amazon SES, Brevo...)."
+    fi
+    if [ "$WANT_EMAIL" = true ]; then
+      ask "Mail server (SMTP) host, e.g. smtp.example.com"
+      SMTP_HOST="$REPLY_VALUE"
+      ask "Port (587 for STARTTLS, 465 for TLS)" 587
+      SMTP_PORT="$REPLY_VALUE"
+      case "$SMTP_PORT" in *[!0-9]*|'') die "The mail server's port has to be a number." ;; esac
+      read -r -p "Username (often your full email address; blank if none): " SMTP_USER || true
+      SMTP_AUTH=""
+      if [ -n "$SMTP_USER" ]; then
+        ask_secret "Password (Gmail, Outlook and iCloud need an app password here)"
+        SMTP_AUTH="$(urlencode "$SMTP_USER"):$(urlencode "$REPLY_VALUE")@"
+      fi
+      ask "Send the emails from" "noreply@$BASE_DOMAIN"
+      SMTP_FROM="$REPLY_VALUE"
+      # smtps:// is TLS from the first byte (465); ?tls=required upgrades with STARTTLS (587, 25)
+      # and refuses to carry on unencrypted.
+      if [ "$SMTP_PORT" = 465 ]; then
+        SMTP_URI="smtps://$SMTP_AUTH$SMTP_HOST:$SMTP_PORT"
+      else
+        SMTP_URI="smtp://$SMTP_AUTH$SMTP_HOST:$SMTP_PORT?tls=required"
+      fi
+      SMTP_SENDER="Purrlor <$SMTP_FROM>"
+      echo "  ok   the homeserver will test these once it's running"
+    fi
+  fi
 else
   PROVISION_MATRIX=false
   MATRIX_DELEGATED=false
@@ -1452,6 +1518,15 @@ COMPOSE_PROFILE_ARGS=()
 if [ "$PROVISION_MATRIX" = true ]; then
   COMPOSE_PROFILE_ARGS=(--profile matrix)
 
+  # Mail settings from an earlier run are set aside while accounts are created (the bot's account
+  # couldn't verify an email address) and put back, and re-tested, afterwards.
+  # (An interrupted earlier run can leave them set aside already.)
+  if [ -f matrix-email.env ]; then mv matrix-email.env matrix-email.env.paused; fi
+  if [ -f matrix-email.env.paused ]; then
+    SMTP_URI="$(sed -n "s/^CONTINUWUITY_SMTP__CONNECTION_URI='\(.*\)'$/\1/p" matrix-email.env.paused | tail -n1)"
+    SMTP_SENDER="$(sed -n "s/^CONTINUWUITY_SMTP__SENDER='\(.*\)'$/\1/p" matrix-email.env.paused | tail -n1)"
+  fi
+
   log "Starting the new homeserver first (its accounts need to exist before the rest of the stack can use them)"
   # The homeserver is an upstream image — nothing of ours to build.
   docker compose -f deploy/docker-compose.yml --env-file .env "${COMPOSE_PROFILE_ARGS[@]}" up -d matrix
@@ -1525,6 +1600,29 @@ if [ "$PROVISION_MATRIX" = true ]; then
     echo "  ok   registration will be closed once the stack restarts"
   fi
   echo "  ok   .env updated"
+
+  EMAIL_VERIFICATION=off
+  if [ -n "$SMTP_URI" ]; then
+    log "Turning on email verification for new accounts"
+    case "$MATRIX_REGISTRATION_MODE" in
+      email) SMTP_MODE=open ;;
+      token) SMTP_MODE=code ;;
+      # Closed for now: whatever an earlier run chose applies again if sign-up is reopened.
+      *) if grep -q "^CONTINUWUITY_SMTP__REQUIRE_EMAIL_FOR_REGISTRATION='true'" matrix-email.env.paused 2>/dev/null; then SMTP_MODE=open; else SMTP_MODE=code; fi ;;
+    esac
+    if PURRLOR_SMTP_URI="$SMTP_URI" PURRLOR_SMTP_SENDER="$SMTP_SENDER" PURRLOR_SMTP_MODE="$SMTP_MODE" "$REPO_ROOT/deploy/purrlor" email-apply; then
+      EMAIL_VERIFICATION=on
+      rm -f matrix-email.env.paused
+      # Switching to email-only replaces the sign-up code; keep this run's copy in step.
+      MATRIX_REGISTRATION_TOKEN="$(env_get MATRIX_REGISTRATION_TOKEN)"
+    else
+      if [ "$MATRIX_REGISTRATION_MODE" = email ]; then MATRIX_REGISTRATION_MODE=token; fi
+      warn "Carrying on without it: sign-up works with just the sign-up code for now. Once the mail
+    server is sorted out, turn it on with:  sudo purrlor email setup"
+      # An earlier run's working settings aren't thrown away over one failed test.
+      if [ -f matrix-email.env.paused ]; then mv matrix-email.env.paused matrix-email.env.failed; fi
+    fi
+  fi
 fi
 
 log "Downloading and starting the rest of the Purrlor stack"
@@ -1612,6 +1710,13 @@ screen asks for it):
     $MATRIX_REGISTRATION_TOKEN
 
 To revoke it and make a new one:  purrlor new-invite-code"
+    if [ "${EMAIL_VERIFICATION:-off}" = on ]; then
+      SIGNUP_NOTE="$SIGNUP_NOTE
+They'll also confirm their email address from a link the server sends (purrlor email)."
+    fi
+  elif [ "$MATRIX_REGISTRATION_MODE" = email ]; then
+    SIGNUP_NOTE="Inviting people: anyone can sign up by confirming their email address from a link
+the server sends — no sign-up code needed. To require a code as well:  purrlor email codes on"
   else
     SIGNUP_NOTE="Inviting people: sign-up is closed. Create accounts from the admin room in Purrlor
 ('!admin users create-user <name>'), or open invite-only sign-up with:  purrlor open-signups"

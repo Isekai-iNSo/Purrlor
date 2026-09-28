@@ -190,6 +190,12 @@ services:
   matrix:
     image: forgejo.ellis.link/continuwuation/continuwuity:latest
     profiles: ['matrix']
+    # Email verification for new accounts, when it's on: `purrlor email setup` writes this file
+    # (mail server, sender, "require an email to sign up") and `purrlor email off` removes it. A
+    # file rather than variables here because Continuwuity won't start on a blank mail setting.
+    env_file:
+      - path: ../matrix-email.env
+        required: false
     extra_hosts:
       - host.docker.internal:host-gateway
     restart: unless-stopped

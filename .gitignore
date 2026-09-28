@@ -3,6 +3,7 @@ dist/
 *.log
 .env
 .env.local
+matrix-email.env*
 
 # Real TLS cert/key material copied here by deploy/setup.sh when TURN hardening is enabled — see
 # deploy/livekit-certs/.gitkeep.

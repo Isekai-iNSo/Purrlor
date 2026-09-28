@@ -76,6 +76,11 @@ Sign-ups (bundled homeserver only):
   purrlor new-invite-code    replace the sign-up code (the old one stops working)
   purrlor open-signups       allow sign-up with the sign-up code
   purrlor close-signups      no new sign-ups at all (the admin can still create accounts)
+  purrlor email              whether new accounts must verify an email address
+  purrlor email setup        turn that on (or change the mail server it sends from)
+  purrlor email codes off    a verified email alone is enough — no sign-up code needed
+  purrlor email codes on     need the sign-up code as well as a verified email
+  purrlor email off          turn it off again
 HELP
 }
 
@@ -271,6 +276,7 @@ cmd_backup() {
       tar -czf /backup/matrix-db.tar.gz -C /var/lib/continuwuity .
     compose start matrix
   fi
+  if [ -f "$EMAIL_FILE" ]; then cp "$EMAIL_FILE" "$work/matrix-email.env"; fi
   tar -czf "$file" -C "$work" .
   rm -rf "$work"
   chmod 600 "$file"
@@ -280,14 +286,25 @@ cmd_backup() {
 
 matrix_only() { has_matrix || die "This install uses its own homeserver's sign-up settings, not Purrlor's bundled one."; }
 
-cmd_new_invite_code() {
-  need_root new-invite-code; matrix_only
+# new_code -> prints a fresh sign-up code, already saved to .env (and the install summary). The
+# homeserver only picks it up when its container is next recreated.
+new_code() {
   local token; token="$(openssl rand -hex 16)"
   env_set MATRIX_REGISTRATION_TOKEN "$token"
-  compose up -d matrix
   sed -i "s/^    [0-9a-f]\{32,64\}$/    $token/" .install-summary 2>/dev/null || true
+  printf '%s' "$token"
+}
+
+cmd_new_invite_code() {
+  need_root new-invite-code; matrix_only
+  local token; token="$(new_code)"
+  compose up -d matrix
   say "New sign-up code (the old one no longer works):"
   echo "    $token"
+  if email_only; then
+    echo "   Sign-up is by email right now, and this code lets someone skip the email check — only"
+    echo "   hand it to people you trust."
+  fi
 }
 
 cmd_signups() {
@@ -295,12 +312,235 @@ cmd_signups() {
   if [ "$1" = open ]; then
     env_set MATRIX_ALLOW_REGISTRATION true
     compose up -d matrix
-    say "Sign-up is open to anyone with the sign-up code: $(env_get MATRIX_REGISTRATION_TOKEN)"
+    if email_only; then
+      say "Sign-up is open to anyone who confirms an email address."
+    else
+      say "Sign-up is open to anyone with the sign-up code: $(env_get MATRIX_REGISTRATION_TOKEN)"
+    fi
   else
     env_set MATRIX_ALLOW_REGISTRATION false
     compose up -d matrix
     say "Sign-up is closed. Create accounts from the admin room: !admin users create-user <name>"
   fi
+}
+# ---------------------------------------------------------------------------
+# Email verification (bundled homeserver)
+# ---------------------------------------------------------------------------
+
+# The homeserver's mail settings live in a file of their own, not in .env: Continuwuity refuses to
+# start on a blank mail setting, so they can't be compose variables that are simply empty while
+# email is off. deploy/docker-compose.yml loads this file when it exists.
+EMAIL_FILE="$REPO_ROOT/matrix-email.env"
+
+email_setting() { sed -n "s/^$1='\(.*\)'$/\1/p" "$EMAIL_FILE" 2>/dev/null | tail -n1; }
+
+# Sign-up by verified email alone, no code needed (rather than a code plus a verified email).
+email_only() { [ "$(email_setting CONTINUWUITY_SMTP__REQUIRE_EMAIL_FOR_REGISTRATION)" = true ]; }
+
+# urlencode STRING -> STRING made safe to put in a URL (a password with @ or : in it, say).
+urlencode() {
+  local LC_ALL=C s="$1" out="" c i
+  for ((i = 0; i < ${#s}; i++)); do
+    c="${s:i:1}"
+    case "$c" in
+      [A-Za-z0-9._~-]) out+="$c" ;;
+      *) out+="$(printf '%%%02X' "'$c")" ;;
+    esac
+  done
+  printf '%s' "$out"
+}
+
+# email_hint ERROR -> a plain-language next step for the homeserver's SMTP error, if there is one.
+email_hint() {
+  case "$1" in
+    *"lookup address"*|*"Name or service not known"*|*"Name does not resolve"*)
+      echo "That mail server's name doesn't resolve — check the spelling of the host." ;;
+    *"STARTTLS is not supported"*)
+      echo "That port doesn't offer STARTTLS. Most providers use 587 for it; for port 465 choose the TLS option." ;;
+    *"authentication"*|*"Authentication"*|*"535"*|*"credentials"*)
+      echo "The mail server turned down the username or password. Many providers (Gmail, Outlook, iCloud) need an app password here, not your normal one." ;;
+    *"timed out"*|*"Timeout"*|*"Connection refused"*|*"os error 111"*|*"os error 110"*)
+      echo "Couldn't connect to it. Many hosting providers block outgoing mail ports (25, 465, 587) until you ask them to lift it; also check the port number." ;;
+    *"certificate"*|*"InvalidCertificate"*|*"handshake"*)
+      echo "The TLS handshake failed — usually the wrong security option for that port (465 is TLS, 587 is STARTTLS)." ;;
+  esac
+}
+
+# email_wait SINCE -> "ok", or the homeserver's own words for why its mail check failed. It tests
+# the connection each time it starts and logs the result either way.
+email_wait() {
+  local logs line
+  for _ in $(seq 1 45); do
+    logs="$(compose logs --no-color --since "$1" matrix 2>&1 | sed 's/\x1b\[[0-9;]*m//g' || true)"
+    if printf '%s' "$logs" | grep -q 'SMTP connection test successful'; then echo ok; return; fi
+    line="$(printf '%s' "$logs" | grep -oE '(SMTP connection test failed|Failed to set up SMTP transport): .*' | head -n1 || true)"
+    if [ -n "$line" ]; then echo "$line"; return; fi
+    sleep 2
+  done
+  echo "no word from the homeserver about its mail server within 90 seconds ('purrlor logs matrix' shows what it's doing)"
+}
+
+# email_apply URI SENDER [MODE] -> requires new accounts to verify an email address, sending
+# through that mail server — but only once the homeserver has proven it can log in to it. A mail
+# setting it can't use stops it from starting at all, so on failure the previous settings go
+# straight back. MODE "code" (the default) keeps the sign-up code too; "open" drops it, so anyone
+# who confirms an email address can sign up.
+email_apply() {
+  local uri="$1" sender="$2" mode="${3:-code}" base since result backup="" old_code="" require
+  base="$(env_get PURRLOR_HOMESERVER_URL)"
+  [ -n "$base" ] || die "PURRLOR_HOMESERVER_URL isn't in .env — re-run setup.sh."
+  case "$uri$sender" in *"'"*) die "The mail settings can't contain a ' character." ;; esac
+  case "$mode" in
+    open) require=REQUIRE_EMAIL_FOR_REGISTRATION ;;
+    code) require=REQUIRE_EMAIL_FOR_TOKEN_REGISTRATION ;;
+    *) die "Unknown sign-up mode: $mode" ;;
+  esac
+  # Continuwuity keeps the configured code working alongside email-only sign-up, as a way to skip
+  # the email check (verified live: it offers the two as alternatives). Codes already handed out
+  # shouldn't keep that power, so switching to email-only replaces the code with one nobody has.
+  if [ "$mode" = open ] && ! email_only; then old_code="$(env_get MATRIX_REGISTRATION_TOKEN)"; new_code >/dev/null; fi
+  if [ -f "$EMAIL_FILE" ]; then backup="$(mktemp)"; cp "$EMAIL_FILE" "$backup"; fi
+  (
+    umask 077
+    cat > "$EMAIL_FILE" <<EMAIL_EOF
+# Email verification for new accounts on the bundled homeserver. Managed by 'purrlor email' —
+# 'purrlor email setup' to change it, 'purrlor email codes on|off' to switch whether a sign-up
+# code is needed too, 'purrlor email off' to turn it off. Not in git: it holds the mail server's
+# password.
+CONTINUWUITY_SMTP__CONNECTION_URI='$uri'
+CONTINUWUITY_SMTP__SENDER='$sender'
+# REQUIRE_EMAIL_FOR_TOKEN_REGISTRATION: a sign-up code AND a verified email address.
+# REQUIRE_EMAIL_FOR_REGISTRATION: a verified email address alone is enough.
+CONTINUWUITY_SMTP__$require='true'
+# The verification link in the email points here, so it has to be the homeserver's public address.
+CONTINUWUITY_WELL_KNOWN__CLIENT='$base'
+EMAIL_EOF
+  )
+  say "Restarting the homeserver with the new mail settings, and waiting for it to test them"
+  since="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  compose up -d --force-recreate matrix
+  result="$(email_wait "$since")"
+  if [ "$result" = ok ]; then
+    rm -f "$backup"
+    say "Email verification is on: new accounts confirm an address from a link sent by $sender"
+    if [ "$mode" = open ]; then
+      echo "   No sign-up code needed: anyone who confirms an email address can create an account."
+      [ "$(env_get MATRIX_ALLOW_REGISTRATION)" != false ] || echo "   (Sign-up itself is closed right now — open it with: sudo purrlor open-signups)"
+    else
+      echo "   They also need the sign-up code: $(env_get MATRIX_REGISTRATION_TOKEN)"
+    fi
+    return 0
+  fi
+  if [ -n "$backup" ]; then mv "$backup" "$EMAIL_FILE"; else rm -f "$EMAIL_FILE"; fi
+  if [ -n "$old_code" ]; then env_set MATRIX_REGISTRATION_TOKEN "$old_code"; sed -i "s/^    [0-9a-f]\{32,64\}$/    $old_code/" .install-summary 2>/dev/null || true; fi
+  compose up -d --force-recreate matrix
+  warn "The homeserver couldn't use that mail server, so nothing was changed:"
+  warn "  $result"
+  local hint; hint="$(email_hint "$result")"
+  [ -z "$hint" ] || echo "   $hint" >&2
+  return 1
+}
+
+email_prompt() {
+  local host port security user pass sender_addr sender_name
+  echo "New accounts will have to confirm an email address by clicking a link. The homeserver"
+  echo "sends that email through a mail server you have an account on — your email provider's"
+  echo "SMTP settings, or a sending service (Resend, Postmark, Mailgun, Amazon SES, Brevo...)."
+  echo
+  read -r -p "Mail server (SMTP) host, e.g. smtp.example.com: " host
+  [ -n "$host" ] || die "No mail server given — nothing changed."
+  read -r -p "Port [587]: " port; port="${port:-587}"
+  case "$port" in *[!0-9]*|'') die "The port has to be a number." ;; esac
+  if [ "$port" = 465 ]; then security=tls; else security=starttls; fi
+  read -r -p "Username (often your full email address; blank if none): " user
+  if [ -n "$user" ]; then read -r -s -p "Password (an app password for Gmail/Outlook/iCloud): " pass; echo; fi
+  read -r -p "Send from this address (e.g. noreply@$(host_of "$(env_get PURRLOR_HOMESERVER_URL)" | sed 's/^matrix\.//')): " sender_addr
+  printf '%s' "$sender_addr" | grep -q '@' || die "That doesn't look like an email address — nothing changed."
+  read -r -p "Name it's from [Purrlor]: " sender_name; sender_name="${sender_name:-Purrlor}"
+
+  # smtps:// is TLS from the first byte (port 465); smtp://…?tls=required upgrades with STARTTLS
+  # (587, 25) and refuses to go on unencrypted.
+  local auth=""
+  [ -z "$user" ] || auth="$(urlencode "$user"):$(urlencode "$pass")@"
+  if [ "$security" = tls ]; then
+    SMTP_URI="smtps://$auth$host:$port"
+  else
+    SMTP_URI="smtp://$auth$host:$port?tls=required"
+  fi
+  SMTP_SENDER="$sender_name <$sender_addr>"
+
+  local current=2 choice
+  if email_only; then current=1; fi
+  echo
+  echo "Who can sign up once email verification is on?"
+  echo "  1) Anyone who confirms an email address — no sign-up code needed"
+  echo "  2) Only people with the sign-up code, who also confirm an email address"
+  read -r -p "Choice [$current]: " choice; choice="${choice:-$current}"
+  case "$choice" in
+    1) SMTP_MODE=open ;;
+    2) SMTP_MODE=code ;;
+    *) die "Pick 1 or 2 — nothing changed." ;;
+  esac
+}
+
+cmd_email() {
+  case "${1:-status}" in
+    status)
+      matrix_only
+      if [ -f "$EMAIL_FILE" ]; then
+        local uri; uri="$(email_setting CONTINUWUITY_SMTP__CONNECTION_URI | sed -E 's#^([a-z]+://)[^@/]*@#\1***@#')"
+        if email_only; then
+          say "Anyone who verifies an email address can sign up — no sign-up code needed."
+        else
+          say "New accounts need the sign-up code and a verified email address."
+        fi
+        echo "   Sent from $(email_setting CONTINUWUITY_SMTP__SENDER) through $uri"
+        local seen
+        seen="$(compose logs --no-color matrix 2>&1 | sed 's/\x1b\[[0-9;]*m//g' | grep -oE 'SMTP connection test (successful|failed: .*)' | tail -n1 || true)"
+        [ -z "$seen" ] || echo "   Homeserver's last check: $seen"
+        if email_only; then
+          echo "   Require a sign-up code too: sudo purrlor email codes on"
+        else
+          echo "   Drop the sign-up code (email alone is enough): sudo purrlor email codes off"
+        fi
+        echo "   Change the mail server: sudo purrlor email setup    Turn it off: sudo purrlor email off"
+      else
+        say "Email verification is off — new accounts only need the sign-up code."
+        echo "   Turn it on: sudo purrlor email setup"
+      fi
+      ;;
+    setup)
+      need_root email setup; matrix_only
+      email_prompt
+      email_apply "$SMTP_URI" "$SMTP_SENDER" "$SMTP_MODE"
+      ;;
+    codes)
+      need_root email codes; matrix_only
+      [ -f "$EMAIL_FILE" ] || die "Email verification is off, so a sign-up code is the only way in. Set it up first: sudo purrlor email setup"
+      local mode
+      case "${2:-}" in
+        on) mode=code ;;
+        off) mode=open ;;
+        *) die "Usage: purrlor email codes on|off   (on: a sign-up code and a verified email; off: a verified email alone)" ;;
+      esac
+      email_apply "$(email_setting CONTINUWUITY_SMTP__CONNECTION_URI)" "$(email_setting CONTINUWUITY_SMTP__SENDER)" "$mode"
+      ;;
+    off)
+      need_root email off; matrix_only
+      [ -f "$EMAIL_FILE" ] || { say "Email verification is already off."; return 0; }
+      rm -f "$EMAIL_FILE"
+      compose up -d --force-recreate matrix
+      say "Email verification is off — new accounts need the sign-up code: $(env_get MATRIX_REGISTRATION_TOKEN)"
+      ;;
+    *) die "Usage: purrlor email [setup|codes on|codes off|off]" ;;
+  esac
+}
+
+# setup.sh's way in: the settings it asked for arrive in PURRLOR_SMTP_URI / PURRLOR_SMTP_SENDER
+# (environment, so the password isn't on a command line).
+cmd_email_apply() {
+  need_root email-apply; matrix_only
+  email_apply "${PURRLOR_SMTP_URI:?}" "${PURRLOR_SMTP_SENDER:?}" "${PURRLOR_SMTP_MODE:-code}"
 }
 
 # The dispatcher and the `exit` after it are one command (same line as `esac`), so bash has read
@@ -318,5 +558,7 @@ case "${1:-help}" in
   new-invite-code) cmd_new_invite_code ;;
   open-signups) cmd_signups open ;;
   close-signups) cmd_signups close ;;
+  email) shift; cmd_email "$@" ;;
+  email-apply) cmd_email_apply ;;
   *) warn "Unknown command: $1"; echo; cmd_help; exit 1 ;;
 esac; exit $?

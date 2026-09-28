@@ -563,6 +563,14 @@ The installer links a `purrlor` command into `/usr/local/bin`:
   stops for the few seconds the copy takes, so it's consistent). Copy it off the server.
 - **`purrlor new-invite-code`**, **`open-signups`**, **`close-signups`** — who can join the bundled
   homeserver.
+- **`purrlor media`** — where the bundled homeserver keeps uploads (usually most of the disk space
+  it uses), and how much room they take. **`purrlor media move /path/to/dir`** moves them to
+  another folder or disk (it checks there's room, copies and verifies with the homeserver
+  stopped, then offers to delete the old copy); **`purrlor media move default`** puts them back in
+  Docker's storage. The folder is `MATRIX_MEDIA_DIR` in `.env` — change it only with `media move`,
+  which is what actually moves the files. `purrlor backup` includes the media wherever it is.
+- **`purrlor user ...`** / **`purrlor admin <command>`** — manage accounts on the bundled
+  homeserver (list, reset a password, deactivate, change an email) without the admin room.
 - **Cert renewal** is automatic via certbot's systemd timer (`systemctl list-timers | grep
   certbot`) plus the nginx reload hook — nothing to do unless `certbot renew --dry-run` ever stops
   succeeding.

@@ -223,6 +223,12 @@ services:
       NO_PROXY: ${OUTBOUND_NO_PROXY:-}
     volumes:
       - matrix-db:/var/lib/continuwuity
+      # Uploaded media, usually most of the space the server uses. Continuwuity always keeps it
+      # in <database>/media, so `purrlor media move <dir>` copies it to a directory of your
+      # choosing (MATRIX_MEDIA_DIR in .env, mounted here) and turns that folder into a symlink to
+      # this. Unset, this is an empty, unused volume and media stays inside matrix-db — so an
+      # install from before this setting needs nothing moved.
+      - ${MATRIX_MEDIA_DIR:-matrix-media}:/purrlor-media
       # Docker's default embedded DNS resolver causes federation lookup timeouts for Continuwuity
       # (documented upstream behavior, not specific to this deployment) — mounting a real
       # resolv.conf works around it. `purrlor` writes it from this server's own DNS settings
@@ -243,3 +249,4 @@ networks:
 
 volumes:
   matrix-db:
+  matrix-media:

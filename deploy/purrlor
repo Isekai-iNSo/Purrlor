@@ -111,6 +111,12 @@ Sign-ups (bundled homeserver only):
   purrlor email codes on     need the sign-up code as well as a verified email
   purrlor email off          turn it off again
 
+Media storage (bundled homeserver only) — uploads, usually most of the disk space used:
+  purrlor media                        where it's stored, how big it is, free space there
+  purrlor media move <dir>             move it to another folder or disk (checks space first)
+  purrlor media move default           move it back into Docker's storage
+  purrlor media clean                  delete the old copy a move left in Docker's storage
+
 Accounts (bundled homeserver only; asks for the admin account's password):
   purrlor user list                    every account on this homeserver
   purrlor user reset-password <name>   new password, and signs them out everywhere
@@ -309,8 +315,10 @@ cmd_backup() {
     say "Stopping the homeserver briefly for a consistent copy"
     compose stop matrix
     local cid; cid="$(compose ps -a -q matrix)"
+    # -h: when media lives elsewhere ('purrlor media move'), its folder here is a symlink to it —
+    # save the files, not the link.
     docker run --rm --volumes-from "$cid" -v "$work:/backup" alpine \
-      tar -czf /backup/matrix-db.tar.gz -C /var/lib/continuwuity .
+      tar -czhf /backup/matrix-db.tar.gz -C /var/lib/continuwuity .
     compose start matrix
   fi
   if [ -f "$EMAIL_FILE" ]; then cp "$EMAIL_FILE" "$work/matrix-email.env"; fi
@@ -583,6 +591,176 @@ cmd_email_apply() {
 }
 
 # ---------------------------------------------------------------------------
+# Media storage (bundled homeserver)
+# ---------------------------------------------------------------------------
+
+# Continuwuity keeps uploads in <database>/media — inside the matrix-db volume, so on Docker's
+# disk. To put them elsewhere, the compose file always mounts MATRIX_MEDIA_DIR (unset: an unused
+# empty volume) at /purrlor-media, and moving there turns that media folder into a symlink to it.
+# Every step below runs in a throwaway container sharing the homeserver's mounts, the same way
+# 'purrlor backup' reads its data.
+MEDIA=/var/lib/continuwuity/media
+
+# media_sh [docker run options...] SCRIPT -> runs SCRIPT against the homeserver container's mounts.
+media_sh() {
+  local script="${*: -1}" cid
+  cid="$(compose ps -a -q matrix)"
+  [ -n "$cid" ] || die "The homeserver container doesn't exist yet — start it first: purrlor restart matrix"
+  docker run --rm --volumes-from "$cid" "${@:1:$#-1}" alpine sh -c "$script"
+}
+
+# The copies, run with the homeserver stopped. Each checks the copy against the original — file
+# count and total bytes — before switching anything, and prints that count. tally's trailing /.
+# follows the media folder when it's a symlink; links inside it stay links, as cp -a leaves them.
+#
+# Out to a folder (mounted at /to here, at /purrlor-media once the homeserver restarts): the media
+# folder then becomes a link to it. A real folder — media in Docker's storage until now — is set
+# aside rather than deleted, until the move has worked.
+read -r -d '' MEDIA_OUT <<'SH' || true
+set -e
+tally() { find "$1/." -type f -exec stat -c %s {} + | awk '{ n++; s += $1 } END { print n + 0, s + 0 }'; }
+M=/var/lib/continuwuity/media
+[ -e "$M" ] || mkdir -p "$M"
+chown "$(stat -Lc %u:%g "$M")" /to
+cp -a "$M/." /to/
+a="$(tally "$M")"; b="$(tally /to)"
+[ "$a" = "$b" ] || { echo "The copy doesn't match the original ($a vs $b files/bytes)." >&2; exit 1; }
+if [ -L "$M" ]; then rm "$M"; else mv "$M" "$M.moved-away"; fi
+ln -s /purrlor-media "$M"
+echo "$a"
+SH
+
+# Back into Docker's storage: copy beside the link, then swap the copy in for it.
+read -r -d '' MEDIA_BACK <<'SH' || true
+set -e
+tally() { find "$1/." -type f -exec stat -c %s {} + | awk '{ n++; s += $1 } END { print n + 0, s + 0 }'; }
+M=/var/lib/continuwuity/media
+rm -rf "$M.new"
+mkdir "$M.new"
+chown "$(stat -Lc %u:%g "$M")" "$M.new"
+cp -a "$M/." "$M.new/"
+a="$(tally "$M")"; b="$(tally "$M.new")"
+[ "$a" = "$b" ] || { rm -rf "$M.new"; echo "The copy doesn't match the original ($a vs $b files/bytes)." >&2; exit 1; }
+rm "$M"
+mv "$M.new" "$M"
+echo "$a"
+SH
+
+media_where() {
+  local dir; dir="$(env_get MATRIX_MEDIA_DIR)"
+  if [ -n "$dir" ]; then echo "$dir"; else echo "Docker's storage (the homeserver's own volume)"; fi
+}
+
+# free_kb DIR -> kilobytes free on DIR's filesystem.
+free_kb() { df -Pk "$1" | awk 'NR == 2 { print $4 }'; }
+
+cmd_media_status() {
+  say "Media is stored in: $(media_where)"
+  local used dir
+  used="$(media_sh "[ -e $MEDIA ] && du -shL $MEDIA/ | cut -f1 || echo nothing yet")"
+  echo "   Taking up: $used"
+  dir="$(env_get MATRIX_MEDIA_DIR)"
+  [ -n "$dir" ] || dir="$(docker info -f '{{.DockerRootDir}}')"
+  echo "   Free there: $(df -Ph "$dir" | awk 'NR == 2 { print $4 }')"
+  echo "   Move it: sudo purrlor media move /path/to/dir    Back to Docker's storage: sudo purrlor media move default"
+}
+
+cmd_media_move() {
+  local target="${1:-}" current dest need free answer tally
+  [ -n "$target" ] || die "Usage: purrlor media move /path/to/dir   (or 'default' for Docker's storage)"
+  current="$(env_get MATRIX_MEDIA_DIR)"
+
+  if [ "$target" = default ]; then
+    dest=""
+    [ -n "$current" ] || die "Media is already in Docker's storage."
+  else
+    case "$target" in /*) ;; *) die "Give the full path, starting with / — e.g. /mnt/storage/purrlor-media" ;; esac
+    case "$target" in *[[:space:]:,]*) die "The path can't contain spaces, ':' or ','." ;; esac
+    dest="$(realpath -m "$target")"
+    [ "$dest" != / ] || die "Not the root directory — pick a folder for it."
+    [ "$dest" != "$current" ] || die "Media is already stored in $dest."
+    if [ -e "$dest" ] && [ -n "$(ls -A "$dest" 2>/dev/null)" ]; then
+      die "$dest isn't empty — pick an empty or new folder, so nothing already there gets mixed in."
+    fi
+  fi
+
+  # A copy set aside by an earlier move and never deleted would be in the way of setting this one's aside.
+  if [ -n "$dest" ] && [ -z "$current" ] && [ "$(media_sh "[ -e $MEDIA.moved-away ] && echo yes || true")" = yes ]; then
+    die "An earlier move's old copy is still in Docker's storage — delete it first: sudo purrlor media clean"
+  fi
+
+  need="$(media_sh "[ -e $MEDIA ] && du -skL $MEDIA/ | cut -f1 || echo 0")"
+  if [ -n "$dest" ]; then
+    mkdir -p "$dest"
+    free="$(free_kb "$dest")"
+  else
+    free="$(free_kb "$(docker info -f '{{.DockerRootDir}}')")"
+  fi
+  # Room for the copy, with a margin: the homeserver keeps writing to that disk afterwards too.
+  if [ "$free" -lt $(( need + need / 20 + 102400 )) ]; then
+    [ -z "$dest" ] || rmdir "$dest" 2>/dev/null || true
+    die "Not enough space there: media takes $(( need / 1024 )) MB, and only $(( free / 1024 )) MB is free."
+  fi
+
+  local to="Docker's storage"; [ -z "$dest" ] || to="$dest"
+  echo "Moving $(( need / 1024 )) MB of media from $(media_where) to $to."
+  echo "The homeserver is stopped while it copies (chat and calls go offline for that time); the old"
+  echo "copy stays until the new one is checked and the homeserver is running on it."
+  read -r -p "Go ahead? [y/N] " answer
+  case "$answer" in [yY]*) ;; *) [ -z "$dest" ] || rmdir "$dest" 2>/dev/null || true; die "Nothing changed." ;; esac
+
+  say "Stopping the homeserver"
+  compose stop matrix
+
+  say "Copying"
+  if [ -n "$dest" ]; then
+    if ! tally="$(media_sh -v "$dest:/to" "$MEDIA_OUT")"; then
+      compose start matrix
+      warn "The copy failed, so nothing was switched — the homeserver is back on the media where it was."
+      die "The partial copy is in $dest; delete it before trying again."
+    fi
+  elif ! tally="$(media_sh "$MEDIA_BACK")"; then
+    compose start matrix
+    die "The copy failed, so nothing was switched — the homeserver is back on the media where it was."
+  fi
+  echo "   Copied and checked: ${tally% *} files, $(( ${tally#* } / 1048576 )) MB"
+
+  env_set MATRIX_MEDIA_DIR "$dest"
+  say "Starting the homeserver on the new location"
+  compose up -d matrix
+  say "Media is now stored in: $(media_where)"
+
+  # The old copy, now unused.
+  echo
+  if [ -z "$current" ]; then
+    read -r -p "Delete the old copy in Docker's storage to free the space? [y/N] " answer
+    case "$answer" in
+      [yY]*) media_sh "rm -rf $MEDIA.moved-away"; say "Deleted." ;;
+      *) echo "   Kept. Delete it later with: sudo purrlor media clean" ;;
+    esac
+  else
+    read -r -p "Delete the old copy in $current to free the space? [y/N] " answer
+    case "$answer" in
+      [yY]*) rm -rf "${current:?}"; say "Deleted." ;;
+      *) echo "   Kept. Delete it later with: sudo rm -rf $current" ;;
+    esac
+  fi
+}
+
+cmd_media() {
+  need_root media; matrix_only
+  case "${1:-status}" in
+    status) cmd_media_status ;;
+    move) cmd_media_move "${2:-}" ;;
+    clean)
+      media_sh "[ -e $MEDIA.moved-away ] && rm -rf $MEDIA.moved-away && echo removed || echo none" \
+        | grep -q removed && say "Deleted the old copy from Docker's storage." || say "There's no old copy to delete."
+      ;;
+    *) die "Usage: purrlor media [status|move /path/to/dir|move default|clean]" ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
 # Accounts (bundled homeserver)
 # ---------------------------------------------------------------------------
 
@@ -738,6 +916,7 @@ case "${1:-help}" in
   close-signups) cmd_signups close ;;
   email) shift; cmd_email "$@" ;;
   email-apply) cmd_email_apply ;;
+  media) shift; cmd_media "$@" ;;
   user) shift; cmd_user "$@" ;;
   admin) shift; cmd_admin "$@" ;;
   matrix-dns) write_matrix_resolv ;;

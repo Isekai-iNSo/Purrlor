@@ -9,6 +9,11 @@
     <AssemblyName>Purrlor</AssemblyName>
     <RootNamespace>Purrlor</RootNamespace>
     <Platforms>x64</Platforms>
+    <!-- The one version number: Build-Purrlor.ps1 reads it for the installer and the release. -->
+    <Version>1.0.0</Version>
+    <Product>Purrlor</Product>
+    <Company>MeowOps</Company>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.3296.44" />

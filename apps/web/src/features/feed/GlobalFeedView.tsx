@@ -30,7 +30,7 @@ const SEARCH_AUTO_PAGES = 4;
  * The global feed. **Everyone** is posts from public places only — people's Global posts and
  * public Spaces, including ones you haven't joined. **Following** is the people and whole Spaces
  * you follow, which may include Spaces you're a member of that aren't public (you can already
- * read those; nobody else sees them here). **Activity** is what people did with your posts.
+ * read those; nobody else sees them here). **Notifications** (Activity in the code) is what people did with your posts.
  *
  * Search (words, or a `#tag`) runs over the posts the current tab has loaded, reading further
  * back a few pages at a time — there's no server-side index to ask (matrix/hashtags.ts).
@@ -163,9 +163,9 @@ export function GlobalFeedView({ hidden = false }: { hidden?: boolean }) {
             {tabButton('following', 'Following')}
             {tabButton(
               'activity',
-              'Activity',
+              'Notifications',
               activityUnread && tab !== 'activity' && (
-                <span className="nu-feed__tab-dot" data-nu-role="global-feed-activity-dot" aria-label="New activity" />
+                <span className="nu-feed__tab-dot" data-nu-role="global-feed-activity-dot" aria-label="New notifications" />
               )
             )}
           </div>

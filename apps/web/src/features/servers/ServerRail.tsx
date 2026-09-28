@@ -143,7 +143,7 @@ export function ServerRail() {
         <CatEars />
         <Icon name="globe" size={22} />
         {/* New likes, comments, reposts, follows or mentions waiting in Activity. */}
-        {activityUnread && <span className="nu-server-rail__item-dot" data-nu-role="server-rail-activity-dot" aria-label="New activity" />}
+        {activityUnread && <span className="nu-server-rail__item-dot" data-nu-role="server-rail-activity-dot" aria-label="New notifications" />}
       </button>
       <div className="nu-server-rail__divider" />
       <div className="nu-server-rail__list" data-nu-role="server-rail-list">

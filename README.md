@@ -99,7 +99,7 @@ specific comment, and **Repost** (instantly, or **Quote** it with your own words
 has the rest: **Report**, **See who liked**, and on your own posts **Edit**, **Pin to profile** and
 **Delete**. A Space's moderators can remove any post or comment in that Space. `@mention` people
 and use `#tags`; a tag opens every post with it. A timeline shows a post's newest 3 comments; tap a
-post's time or text for its own page with the whole thread. The global feed's **Activity** tab
+post's time or text for its own page with the whole thread. The global feed's **Notifications** tab
 shows who liked, commented on, reposted or quoted your posts, followed you, or mentioned you.
 Click any name for their profile: posts, media, who they follow and who follows them.
 

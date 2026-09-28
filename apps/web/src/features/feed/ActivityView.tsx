@@ -160,7 +160,7 @@ function ActivityRow({ item, unread }: { item: ActivityItem; unread: boolean }) 
 }
 
 /**
- * The global feed's Activity tab: what people did with your posts and profile, newest first.
+ * The global feed's Notifications tab (Activity in the code): what people did with your posts and profile, newest first.
  * Opening it marks everything seen (on every device); what was new when you opened it stays
  * highlighted while you're looking.
  */
@@ -178,7 +178,7 @@ export function ActivityView() {
   if (!loaded) {
     return (
       <p className="nu-feed__status" data-nu-role="activity-loading">
-        Checking for activity…
+        Checking for notifications…
       </p>
     );
   }

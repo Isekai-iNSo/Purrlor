@@ -110,6 +110,14 @@ Sign-ups (bundled homeserver only):
   purrlor email codes off    a verified email alone is enough — no sign-up code needed
   purrlor email codes on     need the sign-up code as well as a verified email
   purrlor email off          turn it off again
+
+Accounts (bundled homeserver only; asks for the admin account's password):
+  purrlor user list                    every account on this homeserver
+  purrlor user reset-password <name>   new password, and signs them out everywhere
+  purrlor user deactivate <name>       shut an account for good (its name can't be reused)
+  purrlor user email <name> [address]  change their email address, or remove it with none
+  purrlor user find-email <address>    which account has that email address
+  purrlor admin <command>              any other admin-room command ('purrlor admin help')
 HELP
 }
 
@@ -574,6 +582,145 @@ cmd_email_apply() {
   email_apply "${PURRLOR_SMTP_URI:?}" "${PURRLOR_SMTP_SENDER:?}" "${PURRLOR_SMTP_MODE:-code}"
 }
 
+# ---------------------------------------------------------------------------
+# Accounts (bundled homeserver)
+# ---------------------------------------------------------------------------
+
+# Continuwuity has no admin HTTP API (Synapse-style admin tools get nothing from it): accounts are
+# managed by typing '!admin ...' into its #admins room. So that's what this does — logs in as the
+# admin, posts the command there, prints the server's reply, and logs that session out again.
+# The command and reply stay in the admin room like any other, so there's a record of them.
+#
+# It runs in the token-server container: that already has Node (to read the server's JSON
+# replies; this host may have no jq) and shares a network with the homeserver. The password goes
+# in on stdin, never on a command line.
+read -r -d '' ADMIN_JS <<'JS' || true
+const [server, user, password, ...rest] = require('fs').readFileSync(0, 'utf8').split('\n');
+const command = rest.join('\n').trim();
+const base = 'http://matrix:8008/_matrix/client/v3';
+let token;
+async function call(method, path, body) {
+  const res = await fetch(base + path, {
+    method,
+    headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}) },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  return data;
+}
+(async () => {
+  try {
+    token = (await call('POST', '/login', {
+      type: 'm.login.password',
+      identifier: { type: 'm.id.user', user },
+      password,
+      initial_device_display_name: 'purrlor command line',
+    })).access_token;
+  } catch (err) {
+    console.error(`Couldn't log in as ${user}: ${err.message}`);
+    process.exit(1);
+  }
+  try {
+    const { room_id: room } = await call('GET', '/directory/room/' + encodeURIComponent(`#admins:${server}`));
+    const r = encodeURIComponent(room);
+    const { event_id: sent } = await call('PUT', `/rooms/${r}/send/m.room.message/purrlor-${Date.now()}`, {
+      msgtype: 'm.text',
+      body: `!admin ${command}`,
+    });
+    // The server answers with a reply to the command's event. Deactivating someone in many rooms
+    // can take a while, hence the generous wait.
+    for (let i = 0; i < 60; i++) {
+      await new Promise((done) => setTimeout(done, 1000));
+      const { chunk } = await call('GET', `/rooms/${r}/messages?dir=b&limit=50`);
+      const reply = chunk.find((e) => e.content?.['m.relates_to']?.['m.in_reply_to']?.event_id === sent);
+      if (reply) {
+        console.log(reply.content.body);
+        return;
+      }
+    }
+    console.error('No answer from the homeserver within a minute. Is that the admin account? Commands from anyone else are ignored.');
+    process.exitCode = 1;
+  } catch (err) {
+    console.error(`The admin room turned that down: ${err.message}`);
+    process.exitCode = 1;
+  } finally {
+    await call('POST', '/logout', {}).catch(() => {});
+  }
+})();
+JS
+
+# admin_run COMMAND -> runs '!admin COMMAND' on the bundled homeserver as its admin and prints the
+# reply. Asks which account is the admin (offering the one setup.sh created) and its password.
+admin_run() {
+  local server default user pass
+  server="$(env_get MATRIX_SERVER_NAME)"
+  [ -n "$server" ] || die "MATRIX_SERVER_NAME isn't in .env — re-run setup.sh."
+  default="$(grep -o 'Log in as @[^ ]*' .install-summary 2>/dev/null | head -n1 | cut -c11- || true)"
+  if [ -z "${PURRLOR_ADMIN_USER:-}" ]; then
+    read -r -p "Admin account${default:+ [$default]}: " PURRLOR_ADMIN_USER
+    PURRLOR_ADMIN_USER="${PURRLOR_ADMIN_USER:-$default}"
+    [ -n "$PURRLOR_ADMIN_USER" ] || die "No admin account given."
+  fi
+  if [ -z "${PURRLOR_ADMIN_PASSWORD:-}" ]; then
+    read -r -s -p "Password for $PURRLOR_ADMIN_USER: " PURRLOR_ADMIN_PASSWORD; echo
+  fi
+  say "Running in the admin room: !admin $1"
+  # NODE_USE_ENV_PROXY emptied: the homeserver is on the local Docker network, never via the proxy.
+  printf '%s\n%s\n%s\n%s\n' "$server" "$PURRLOR_ADMIN_USER" "$PURRLOR_ADMIN_PASSWORD" "$1" \
+    | compose exec -T -e NODE_USE_ENV_PROXY= token-server node -e "$ADMIN_JS" \
+    || die "That didn't go through (above says why). If the token server isn't running, 'purrlor status' shows it."
+}
+
+# full_user_id NAME -> @name:server, from "name", "@name" or "@name:server".
+full_user_id() {
+  local name="${1#@}"
+  case "$name" in *:*) printf '@%s' "$name" ;; *) printf '@%s:%s' "$name" "$(env_get MATRIX_SERVER_NAME)" ;; esac
+}
+
+cmd_user() {
+  local usage="Usage: purrlor user list | reset-password <name> | deactivate <name> | email <name> [address] | find-email <address>"
+  local sub="${1:-}"
+  need_root user; matrix_only
+  case "$sub" in
+    list)
+      admin_run "users list"
+      ;;
+    reset-password)
+      [ -n "${2:-}" ] || die "$usage"
+      # Signs them out everywhere too — a stuck or taken-over account shouldn't keep old sessions.
+      admin_run "users reset-password --logout $(full_user_id "$2")"
+      echo "   Give them that password; they can change it in their settings once they're in."
+      ;;
+    deactivate)
+      [ -n "${2:-}" ] || die "$usage"
+      local id confirm; id="$(full_user_id "$2")"
+      echo "Deactivating $id can't be undone, and the name can never be signed up for again (Matrix"
+      echo "doesn't reuse user IDs). To hand a stuck account back to its owner instead:"
+      echo "  purrlor user reset-password $2"
+      read -r -p "Type the name to deactivate it: " confirm
+      [ "$(full_user_id "$confirm")" = "$id" ] || die "Didn't match — nothing changed."
+      admin_run "users deactivate $id"
+      ;;
+    email)
+      [ -n "${2:-}" ] || die "$usage"
+      # No address removes theirs — which frees it for someone signing up again.
+      admin_run "users change-email $(full_user_id "$2")${3:+ $3}"
+      ;;
+    find-email)
+      [ -n "${2:-}" ] || die "$usage"
+      admin_run "users get-user-by-email $2"
+      ;;
+    *) die "$usage" ;;
+  esac
+}
+
+cmd_admin() {
+  need_root admin; matrix_only
+  [ -n "${1:-}" ] || die "Usage: purrlor admin <command>   e.g. purrlor admin users list-joined-rooms @name:server"
+  admin_run "$*"
+}
+
 # The dispatcher and the `exit` after it are one command (same line as `esac`), so bash has read
 # all of it before running any of it — a script updated underneath it can't be half-read.
 case "${1:-help}" in
@@ -591,6 +738,8 @@ case "${1:-help}" in
   close-signups) cmd_signups close ;;
   email) shift; cmd_email "$@" ;;
   email-apply) cmd_email_apply ;;
+  user) shift; cmd_user "$@" ;;
+  admin) shift; cmd_admin "$@" ;;
   matrix-dns) write_matrix_resolv ;;
   *) warn "Unknown command: $1"; echo; cmd_help; exit 1 ;;
 esac; exit $?

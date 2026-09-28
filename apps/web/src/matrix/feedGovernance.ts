@@ -1,5 +1,5 @@
 import { EventType, type MatrixClient, type Room } from 'matrix-js-sdk';
-import { listOwnFeedRooms, POST_EVENT_TYPE, syncFeedVisibility } from './feed';
+import { listOwnFeedRooms, POST_EVENT_TYPE, publishFeedPointer, syncFeedVisibility } from './feed';
 import { privilegedCreators } from './permissions';
 import { isListedInDirectory } from './spaceDirectory';
 
@@ -132,6 +132,10 @@ async function governFeed(mx: MatrixClient, spaceId: string, feedRoomId: string,
 
   const levels = wantedFeedPowerLevels(powerLevels(feed), ownerId, spaceModerators(space));
   if (levels) await mx.sendStateEvent(feedRoomId, EventType.RoomPowerLevels, levels as any, '');
+
+  // A profile change rewrites your member event without the pointer, taking this feed out of the
+  // Space and the global feed until it's put back.
+  await publishFeedPointer(mx, space, feedRoomId);
 
   // One at a time: a Space-wide purge shouldn't fire a burst of kicks into the rate limiter.
   for (const userId of feedMembersToRemove(feed, space, ownerId)) {

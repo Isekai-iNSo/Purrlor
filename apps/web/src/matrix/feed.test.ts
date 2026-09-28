@@ -11,6 +11,7 @@ import {
   isPostEvent,
   listSpaceFeeds,
   makePostPrivate,
+  publishFeedPointer,
   publishPrivatePost,
   readFeedRoomId,
   readPost,
@@ -62,6 +63,9 @@ function fakeEvent({
 function fakeClient({
   joinedRooms = [] as string[],
   historyVisibility = {} as Record<string, string>,
+  /** Your member event in the Space as the server has it; unset, the lookup fails. */
+  serverMember = undefined as Record<string, unknown> | undefined,
+  profile = {} as Record<string, unknown>,
 } = {}) {
   const accountData = new Map<string, Record<string, unknown>>();
   const createRoom = vi.fn().mockResolvedValue({ room_id: MY_FEED });
@@ -94,6 +98,11 @@ function fakeClient({
       return content ? { getContent: () => content } : undefined;
     },
     setAccountData,
+    getStateEvent: vi.fn(async () => {
+      if (!serverMember) throw Object.assign(new Error('M_NOT_FOUND'), { httpStatus: 404 });
+      return serverMember;
+    }),
+    getProfileInfo: vi.fn(async () => profile),
     createRoom,
     sendStateEvent,
     sendEvent,
@@ -212,7 +221,12 @@ describe('ensureFeedRoom', () => {
     });
     accountData.set('xyz.nekous.feed_rooms', { [SPACE_ID]: MY_FEED });
 
-    await ensureFeedRoom(mx, fakeSpace([{ userId: ME, content: { 'xyz.nekous.feed_room': MY_FEED } }]), 'Me', false);
+    await ensureFeedRoom(
+      mx,
+      fakeSpace([{ userId: ME, content: { displayname: 'Me', 'xyz.nekous.feed_room': MY_FEED } }]),
+      'Me',
+      false
+    );
     expect(sendStateEvent).not.toHaveBeenCalled();
   });
 
@@ -240,9 +254,51 @@ describe('ensureFeedRoom', () => {
 
   it('skips the pointer write when it is already correct', async () => {
     const { mx, sendStateEvent } = fakeClient({ joinedRooms: [MY_FEED] });
-    const space = fakeSpace([{ userId: ME, content: { 'xyz.nekous.feed_room': MY_FEED } }]);
+    const space = fakeSpace([{ userId: ME, content: { displayname: 'Me', 'xyz.nekous.feed_room': MY_FEED } }]);
 
     await ensureFeedRoom(mx, space, 'Me');
+    expect(sendStateEvent).not.toHaveBeenCalled();
+  });
+
+  it('puts the pointer back on the server’s copy, so a stale synced name is never written back', async () => {
+    // Just renamed: the server rewrote the member event with the new name and without the pointer
+    // (what Continuwuity does), and this client hasn't synced that yet.
+    const { mx, sendStateEvent } = fakeClient({
+      joinedRooms: [MY_FEED],
+      serverMember: { membership: 'join', displayname: 'mino' },
+    });
+    const space = fakeSpace([{ userId: ME, content: { displayname: '@me:example.org' } }]);
+
+    await publishFeedPointer(mx, space, MY_FEED);
+
+    expect(sendStateEvent).toHaveBeenCalledWith(
+      SPACE_ID,
+      EventType.RoomMember,
+      { membership: 'join', displayname: 'mino', 'xyz.nekous.feed_room': MY_FEED },
+      ME
+    );
+  });
+
+  it('gives a nameless member event the global profile’s name, instead of the bare user ID', async () => {
+    const { mx, sendStateEvent } = fakeClient({
+      joinedRooms: [MY_FEED],
+      serverMember: { membership: 'join', 'xyz.nekous.feed_room': MY_FEED },
+      profile: { displayname: 'mino', avatar_url: 'mxc://a/b' },
+    });
+
+    await publishFeedPointer(mx, fakeSpace([{ userId: ME, content: { 'xyz.nekous.feed_room': MY_FEED } }]), MY_FEED);
+
+    expect(sendStateEvent).toHaveBeenCalledWith(
+      SPACE_ID,
+      EventType.RoomMember,
+      { membership: 'join', displayname: 'mino', avatar_url: 'mxc://a/b', 'xyz.nekous.feed_room': MY_FEED },
+      ME
+    );
+  });
+
+  it('writes nothing when the server already has the pointer and there is no name to add', async () => {
+    const { mx, sendStateEvent } = fakeClient({ serverMember: { membership: 'join', 'xyz.nekous.feed_room': MY_FEED } });
+    await publishFeedPointer(mx, fakeSpace([{ userId: ME }]), MY_FEED);
     expect(sendStateEvent).not.toHaveBeenCalled();
   });
 

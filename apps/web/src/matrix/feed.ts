@@ -415,20 +415,35 @@ export function readFeedMarker(room: Room): { owner: string; spaceId?: string; p
  * Publishes (or re-publishes) the pointer to your feed room on your own member event, preserving
  * everything else in it — your per-Space nickname lives in the same content, and a write that
  * dropped it would silently rename you.
+ *
+ * Re-publishing is routine, not a one-off: a homeserver rewrites your member event in every room
+ * when you change your profile, and Continuwuity writes it fresh, without the pointer (verified
+ * live). FeedGovernance calls this again whenever that happens.
  */
-async function publishFeedPointer(mx: MatrixClient, space: Room, roomId: string): Promise<void> {
+export async function publishFeedPointer(mx: MatrixClient, space: Room, roomId: string): Promise<void> {
   const myUserId = mx.getUserId();
   if (!myUserId) return;
-  const existing = (space.currentState.getStateEvents(EventType.RoomMember, myUserId)?.getContent() ??
+  const synced = (space.currentState.getStateEvents(EventType.RoomMember, myUserId)?.getContent() ??
     {}) as Record<string, unknown>;
-  if (existing[FEED_ROOM_MEMBER_KEY] === roomId) return; // already correct — skip a no-op write
-  await mx.sendStateEvent(
-    space.roomId,
-    EventType.RoomMember,
-    { ...existing, membership: 'join', [FEED_ROOM_MEMBER_KEY]: roomId } as any,
-    myUserId
-  );
+  if (synced[FEED_ROOM_MEMBER_KEY] === roomId && hasText(synced.displayname)) return;
+
+  // The server's copy, not the synced one: right after a profile change the synced copy still has
+  // the old name (or none, if this client never loaded it), and writing it back would undo the
+  // change.
+  const current = ((await mx.getStateEvent(space.roomId, EventType.RoomMember, myUserId).catch(() => undefined)) ??
+    synced) as Record<string, unknown>;
+  const content: Record<string, unknown> = { ...current, membership: 'join', [FEED_ROOM_MEMBER_KEY]: roomId };
+  // A member event without a name shows its owner as their bare user ID everywhere in the Space.
+  if (!hasText(content.displayname)) {
+    const profile = await mx.getProfileInfo(myUserId).catch(() => undefined);
+    if (hasText(profile?.displayname)) content.displayname = profile.displayname;
+    if (!hasText(content.avatar_url) && hasText(profile?.avatar_url)) content.avatar_url = profile.avatar_url;
+  }
+  if (current[FEED_ROOM_MEMBER_KEY] === roomId && content.displayname === current.displayname) return;
+  await mx.sendStateEvent(space.roomId, EventType.RoomMember, content as any, myUserId);
 }
+
+const hasText = (value: unknown): value is string => typeof value === 'string' && value.length > 0;
 
 /**
  * Creates the room a feed lives in. Not routed through `roomCreation.ts`'s `createRoom` on

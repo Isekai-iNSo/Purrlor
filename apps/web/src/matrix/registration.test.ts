@@ -89,7 +89,7 @@ describe('registerAccount — email stage', () => {
     );
 
   it('sends the verified sid/client secret, and resumes the same address when the link was not clicked yet', async () => {
-    const first = { sid: 's1', clientSecret: 'c1', email: 'a@example.com' };
+    const first = { email: 'a@example.com', sessions: [{ sid: 's1', clientSecret: 'c1' }] };
     register
       .mockRejectedValueOnce(emailChallenge())
       .mockRejectedValueOnce(
@@ -112,8 +112,52 @@ describe('registerAccount — email stage', () => {
     });
   });
 
+  it('tries the session of every email sent before asking again — the clicked link may be in an older one', async () => {
+    const sent = {
+      email: 'a@example.com',
+      sessions: [
+        { sid: 's2', clientSecret: 'c2' },
+        { sid: 's1', clientSecret: 'c1' },
+      ],
+    };
+    const notValidated = { errcode: 'M_THREEPID_AUTH_FAILED', error: 'This email address has not been validated.' };
+    register
+      .mockRejectedValueOnce(emailChallenge())
+      .mockRejectedValueOnce(emailChallenge(notValidated))
+      .mockResolvedValueOnce({ user_id: '@a:x', device_id: 'D', access_token: 'T' });
+    const p = { ...prompts([]), verifyEmail: vi.fn(async () => sent) };
+
+    await registerAccount('https://hs.example', 'a', 'password1', p);
+
+    expect(p.verifyEmail).toHaveBeenCalledTimes(1);
+    expect(register.mock.calls[1][3]).toMatchObject({ threepid_creds: { sid: 's2', client_secret: 'c2' } });
+    expect(register.mock.calls[2][3]).toMatchObject({ threepid_creds: { sid: 's1', client_secret: 'c1' } });
+  });
+
+  it('asks again once every session has been turned down', async () => {
+    const sent = {
+      email: 'a@example.com',
+      sessions: [
+        { sid: 's2', clientSecret: 'c2' },
+        { sid: 's1', clientSecret: 'c1' },
+      ],
+    };
+    const notValidated = { errcode: 'M_THREEPID_AUTH_FAILED', error: 'This email address has not been validated.' };
+    register
+      .mockRejectedValueOnce(emailChallenge())
+      .mockRejectedValueOnce(emailChallenge(notValidated))
+      .mockRejectedValueOnce(emailChallenge(notValidated))
+      .mockResolvedValueOnce({ user_id: '@a:x', device_id: 'D', access_token: 'T' });
+    const p = { ...prompts([]), verifyEmail: vi.fn(async () => sent) };
+
+    await registerAccount('https://hs.example', 'a', 'password1', p);
+
+    expect(p.verifyEmail).toHaveBeenNthCalledWith(2, expect.anything(), { previous: sent, error: notValidated.error });
+    expect(register.mock.calls[3][3]).toMatchObject({ threepid_creds: { sid: 's2', client_secret: 'c2' } });
+  });
+
   it('takes the email-only route over the invite-code one when the server offers both', async () => {
-    const creds = { sid: 's1', clientSecret: 'c1', email: 'a@example.com' };
+    const creds = { email: 'a@example.com', sessions: [{ sid: 's1', clientSecret: 'c1' }] };
     register
       .mockRejectedValueOnce(
         new MatrixError(

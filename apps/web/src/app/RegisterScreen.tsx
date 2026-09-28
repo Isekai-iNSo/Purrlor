@@ -280,7 +280,7 @@ export function RegisterScreen({ onSwitchToLogin, onRegistered }: RegisterScreen
       {pendingEmailMx && (
         <EmailVerificationModal
           // A retry is a fresh modal on the same address, so it starts from that state.
-          key={pendingEmailRetry ? 'retry' + pendingEmailRetry.previous.sid : 'new'}
+          key={pendingEmailRetry ? 'retry' + pendingEmailRetry.previous.sessions[0]?.sid : 'new'}
           mx={pendingEmailMx}
           retry={pendingEmailRetry}
           onVerified={handleEmailVerified} onCancel={handleEmailCancelled} />

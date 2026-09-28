@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from 'react';
 import type { MatrixClient } from 'matrix-js-sdk';
 import { Modal } from '../components/Modal';
-import type { EmailRetry, EmailVerification } from '../matrix/registration';
+import type { EmailRetry, EmailSession, EmailVerification } from '../matrix/registration';
 
 function randomClientSecret(): string {
   return Array.from(crypto.getRandomValues(new Uint8Array(16)))
@@ -11,6 +11,8 @@ function randomClientSecret(): string {
 
 // Reads as a link inside the sentence, not a third button beside Cancel/Continue.
 const linkButtonStyle = { background: 'none', border: 'none', padding: 0, color: 'inherit', textDecoration: 'underline', cursor: 'pointer', font: 'inherit' } as const;
+
+const MAX_EMAILS = 5;
 
 type Step = 'enter-email' | 'sending' | 'awaiting-code' | 'awaiting-link-click' | 'submitting-token';
 
@@ -37,17 +39,17 @@ export function EmailVerificationModal({ mx, retry, onVerified, onCancel }: Emai
     retry ? "That address isn't confirmed yet — click the link in the email first, then continue." : undefined
   );
   const [notice, setNotice] = useState<string>();
-  const [sid, setSid] = useState<string | undefined>(retry?.previous.sid);
+  // One per email sent, newest first. Every email gets a session of its own (a fresh client
+  // secret) rather than a resend on the same one: a resend gives the session a new token, which
+  // kills the link in the earlier email — and that's the one people tend to click.
+  const [sessions, setSessions] = useState<EmailSession[]>(retry?.previous.sessions ?? []);
   const [submitUrl, setSubmitUrl] = useState<string>();
-  const [clientSecret, setClientSecret] = useState(() => retry?.previous.clientSecret ?? randomClientSecret());
-  // The server only sends another email when this goes up; the same number again is a no-op.
-  const [sendAttempt, setSendAttempt] = useState(retry ? 2 : 1);
 
-  const sendEmail = async (attempt: number) => {
-    const res = await mx.requestRegisterEmailToken(email.trim(), clientSecret, attempt);
-    setSid(res.sid);
+  const sendEmail = async () => {
+    const clientSecret = randomClientSecret();
+    const res = await mx.requestRegisterEmailToken(email.trim(), clientSecret, 1);
+    setSessions((prev) => [{ sid: res.sid, clientSecret }, ...prev]);
     setSubmitUrl(res.submit_url);
-    setSendAttempt(attempt + 1);
     return res;
   };
 
@@ -58,7 +60,7 @@ export function EmailVerificationModal({ mx, retry, onVerified, onCancel }: Emai
     setError(undefined);
     setNotice(undefined);
     try {
-      const res = await sendEmail(sendAttempt);
+      const res = await sendEmail();
       setStep(res.submit_url ? 'awaiting-code' : 'awaiting-link-click');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to send verification email');
@@ -69,19 +71,23 @@ export function EmailVerificationModal({ mx, retry, onVerified, onCancel }: Emai
   const handleResend = async () => {
     setError(undefined);
     setNotice(undefined);
+    // The server's per-address rate limit only covers resends within one session, and each of
+    // these is a new one — so hold back here instead.
+    if (sessions.length >= MAX_EMAILS) {
+      setError("That's enough emails for now — check spam, or wait a few minutes for them to arrive.");
+      return;
+    }
     try {
-      await sendEmail(sendAttempt);
-      setNotice(`Sent another email to ${email.trim()}. It can take a minute — check spam too.`);
+      await sendEmail();
+      setNotice(`Sent another email to ${email.trim()}. It can take a minute — check spam too. The link in any of them works.`);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to send verification email');
     }
   };
 
   const handleChangeAddress = () => {
-    // A new address is a new verification session on the server.
-    setClientSecret(randomClientSecret());
-    setSendAttempt(1);
-    setSid(undefined);
+    // Sessions for the old address can't confirm the new one.
+    setSessions([]);
     setError(undefined);
     setNotice(undefined);
     setStep('enter-email');
@@ -89,20 +95,22 @@ export function EmailVerificationModal({ mx, retry, onVerified, onCancel }: Emai
 
   const handleSubmitToken = async (evt: FormEvent) => {
     evt.preventDefault();
-    if (!sid || !submitUrl || !token.trim()) return;
+    // The code flow has no resend, so there's only the one session.
+    const session = sessions[0];
+    if (!session || !submitUrl || !token.trim()) return;
     setStep('submitting-token');
     setError(undefined);
     try {
       const res = await fetch(submitUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sid, client_secret: clientSecret, token: token.trim() }),
+        body: JSON.stringify({ sid: session.sid, client_secret: session.clientSecret, token: token.trim() }),
       });
       const data = (await res.json()) as { success?: boolean };
       if (!res.ok || !data.success) {
         throw new Error("That code wasn't accepted — double-check it and try again.");
       }
-      onVerified({ sid, clientSecret, email: email.trim() });
+      onVerified({ email: email.trim(), sessions: [session] });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Verification failed');
       setStep('awaiting-code');
@@ -196,7 +204,7 @@ export function EmailVerificationModal({ mx, retry, onVerified, onCancel }: Emai
             <button
               type="button"
               className="nu-button nu-button--primary"
-              onClick={() => sid && onVerified({ sid, clientSecret, email: email.trim() })}
+              onClick={() => sessions.length > 0 && onVerified({ email: email.trim(), sessions })}
             >
               I've clicked the link — continue
             </button>

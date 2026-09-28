@@ -5,10 +5,16 @@ import { setSession, type Session } from './session';
 export class RegistrationError extends Error {}
 
 export type TermsPolicy = { name: string; url: string; version: string };
-export type EmailVerification = { sid: string; clientSecret: string; email: string };
+export type EmailSession = { sid: string; clientSecret: string };
 
-/** The server turned down an email verification — almost always because the link in the email
- *  hasn't been clicked yet. Carries what's needed to pick up where the user left off. */
+/** One address, and a verification session per email sent to it, newest first. Each resend is
+ *  its own session: Continuwuity gives a session a new token on every resend, which kills the
+ *  link in the earlier email, and people click whichever email they open first. Separate
+ *  sessions keep every link working; registration tries each until the server takes one. */
+export type EmailVerification = { email: string; sessions: EmailSession[] };
+
+/** The server turned down every session sent — almost always because no link in the emails
+ *  has been clicked yet. Carries what's needed to pick up where the user left off. */
 export type EmailRetry = { previous: EmailVerification; error: string };
 
 /** What the caller needs to resolve mid-registration when the server asks for it. */
@@ -69,9 +75,11 @@ export async function registerAccount(
   let sessionId: string | null = null;
   let auth: Record<string, unknown> | undefined;
   let lastEmail: EmailVerification | undefined;
+  let emailSessionIndex = 0;
 
-  // Generous: pressing "continue" before clicking the email's link costs a round each time.
-  for (let attempt = 0; attempt < 20; attempt += 1) {
+  // Generous: pressing "continue" before clicking the email's link costs a round each time,
+  // plus one per extra email sent.
+  for (let attempt = 0; attempt < 40; attempt += 1) {
     try {
       const res = await mx.register(username, password, sessionId, auth as { session?: string; type: string });
       if (!res.access_token || !res.device_id) {
@@ -124,10 +132,19 @@ export async function registerAccount(
       } else if (nextStage === AuthType.Email) {
         // Continuwuity (and Synapse) answer an unconfirmed address with this same stage again,
         // plus the reason — so it's the same person on the same address, not a fresh start.
-        const retry =
-          auth?.type === nextStage && lastEmail ? { previous: lastEmail, error: uia.error ?? '' } : undefined;
-        lastEmail = await prompts.verifyEmail(mx, retry);
-        const { sid, clientSecret } = lastEmail;
+        // Before asking the user again, try the sessions of the other emails they were sent —
+        // the link they clicked may be in any of them.
+        const rejected = auth?.type === nextStage ? lastEmail : undefined;
+        let email: EmailVerification;
+        if (rejected && emailSessionIndex + 1 < rejected.sessions.length) {
+          email = rejected;
+          emailSessionIndex += 1;
+        } else {
+          const retry = rejected ? { previous: rejected, error: uia.error ?? '' } : undefined;
+          email = lastEmail = await prompts.verifyEmail(mx, retry);
+          emailSessionIndex = 0;
+        }
+        const { sid, clientSecret } = email.sessions[emailSessionIndex];
         auth = {
           type: nextStage,
           session: sessionId ?? undefined,

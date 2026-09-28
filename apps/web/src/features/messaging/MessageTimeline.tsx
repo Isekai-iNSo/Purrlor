@@ -782,7 +782,10 @@ export function MessageTimeline({ roomId, onReply }: { roomId: string; onReply: 
             !getReplyEventId(event) &&
             event.getTs() - prevEvent.getTs() < GROUP_WINDOW_MS;
           return (
-            <Fragment key={event.getId()}>
+            // A message you send starts as a local echo with a temporary ID, which changes when
+            // the server confirms it; keyed on that ID, the row remounted then and flickered. The
+            // transaction ID stays put on the same event object across the switch.
+            <Fragment key={event.getTxnId() ?? event.getId()}>
             {newDay && <TimelineDivider variant="day" label={dayLabel(event.getTs())} />}
             {isFirstUnread && <TimelineDivider variant="new" label="New" />}
             <MessageRow

@@ -77,7 +77,8 @@ export function ThreadPanel({
         <div className="nu-thread-panel__replies" data-nu-role="thread-replies">
           {replies.map((event) => (
             <ThreadEventRow
-              key={event.getId()}
+              // Stable across a sent reply's local-echo → server ID switch (see MessageTimeline).
+              key={event.getTxnId() ?? event.getId()}
               event={event}
               emotes={emotes}
               members={members}

@@ -15,6 +15,44 @@ type MediaUrlOptions = {
 // sizes are genuinely different bytes.
 const authedMediaUrlCache = new Map<string, Promise<string>>();
 
+// Synchronous record of already-resolved srcs, keyed by the *request* (mxc + size/method) rather
+// than the HTTP URL, since the HTTP URL itself is only known after the async auth check. Lets a
+// freshly mounted Avatar (e.g. a new message from someone whose avatar is already on screen)
+// render the image on its first paint instead of flashing the initial-letter fallback while the
+// async resolve re-runs.
+const resolvedSrcCache = new WeakMap<ReturnType<typeof useMatrixClient>, Map<string, string>>();
+
+function resolvedKey(mxcUrl: string, width?: number, height?: number, method?: string): string {
+  return `${mxcUrl}|${width ?? ''}|${height ?? ''}|${method ?? ''}`;
+}
+
+function getResolvedSrc(
+  mx: ReturnType<typeof useMatrixClient>,
+  mxcUrl: string | null | undefined,
+  width?: number,
+  height?: number,
+  method?: string,
+): string | null {
+  if (!mxcUrl) return null;
+  return resolvedSrcCache.get(mx)?.get(resolvedKey(mxcUrl, width, height, method)) ?? null;
+}
+
+function setResolvedSrc(
+  mx: ReturnType<typeof useMatrixClient>,
+  mxcUrl: string,
+  src: string,
+  width?: number,
+  height?: number,
+  method?: string,
+): void {
+  let perClient = resolvedSrcCache.get(mx);
+  if (!perClient) {
+    perClient = new Map();
+    resolvedSrcCache.set(mx, perClient);
+  }
+  perClient.set(resolvedKey(mxcUrl, width, height, method), src);
+}
+
 async function resolveAuthenticatedMedia(mx: ReturnType<typeof useMatrixClient>, httpUrl: string): Promise<string> {
   const res = await fetch(httpUrl, { headers: { Authorization: `Bearer ${mx.getAccessToken()}` } });
   if (!res.ok) throw new Error(`Media fetch failed: ${res.status}`);
@@ -33,7 +71,6 @@ async function resolveAuthenticatedMedia(mx: ReturnType<typeof useMatrixClient>,
  */
 export function useMediaUrl(mxcUrl: string | null | undefined, options: MediaUrlOptions = {}): string | null {
   const mx = useMatrixClient();
-  const [src, setSrc] = useState<string | null>(null);
   const { width, height } = options;
   // Only defaults to 'scale' when an actual thumbnail is being requested (width or height
   // given) — matrix-js-sdk's mxcUrlToHttp treats a *truthy* resizeMethod alone as "this is a
@@ -41,10 +78,17 @@ export function useMediaUrl(mxcUrl: string | null | undefined, options: MediaUrl
   // route a no-dimensions request (Avatar.tsx's animated path, EmoteImage.tsx) to `/thumbnail`
   // instead of `/download` — the wrong endpoint for "give me the whole original file".
   const method = options.method ?? (width || height ? 'scale' : undefined);
+  const [src, setSrc] = useState<string | null>(() => getResolvedSrc(mx, mxcUrl, width, height, method));
 
   useEffect(() => {
     if (!mxcUrl) {
       setSrc(null);
+      return undefined;
+    }
+
+    const known = getResolvedSrc(mx, mxcUrl, width, height, method);
+    if (known) {
+      setSrc(known);
       return undefined;
     }
 
@@ -59,6 +103,7 @@ export function useMediaUrl(mxcUrl: string | null | undefined, options: MediaUrl
       }
 
       if (!useAuth) {
+        setResolvedSrc(mx, mxcUrl, httpUrl, width, height, method);
         if (!cancelled) setSrc(httpUrl);
         return;
       }
@@ -74,6 +119,7 @@ export function useMediaUrl(mxcUrl: string | null | undefined, options: MediaUrl
 
       try {
         const url = await cached;
+        setResolvedSrc(mx, mxcUrl, url, width, height, method);
         if (!cancelled) setSrc(url);
       } catch {
         if (!cancelled) setSrc(null);
